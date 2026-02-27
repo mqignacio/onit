@@ -1,4 +1,4 @@
-"""Security tests for MCP tool functions — shell injection prevention."""
+"""Security tests for MCP tool functions — shell injection prevention, path validation, sandbox."""
 
 import json
 import os
@@ -10,6 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import src.mcp.servers.tasks.os.bash.mcp_server as bash_mod
 from src.mcp.servers.tasks.os.bash.mcp_server import (
+    _validate_read_path,
+    _validate_dir_path,
+    _validate_bash_command,
+    _get_sandbox_env,
     search_directory,
     find_files,
     transform_text,
@@ -170,3 +174,156 @@ class TestTransformTextSecurity:
         )
         assert result["status"] == "success"
         assert "goodbye" in result["output"]
+
+
+# ── _validate_read_path ───────────────────────────────────────────────────
+
+
+class TestValidateReadPath:
+    """Path validation for file read operations."""
+
+    def test_allows_path_within_data_path(self, tmp_path):
+        test_file = tmp_path / "allowed.txt"
+        test_file.write_text("ok")
+        result = _validate_read_path(str(test_file))
+        assert result == os.path.realpath(str(test_file))
+
+    def test_allows_path_within_documents_path(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        doc_file = docs_dir / "readme.txt"
+        doc_file.write_text("doc content")
+        bash_mod.DOCUMENTS_PATH = str(docs_dir)
+        result = _validate_read_path(str(doc_file))
+        assert result == os.path.realpath(str(doc_file))
+
+    def test_rejects_path_outside_allowed(self, tmp_path):
+        with pytest.raises(ValueError, match="Read access denied"):
+            _validate_read_path("/etc/passwd")
+
+    def test_rejects_symlink_escape(self, tmp_path):
+        """Symlink pointing outside DATA_PATH should be rejected."""
+        link = tmp_path / "escape_link"
+        link.symlink_to("/etc")
+        target = str(link / "passwd")
+        with pytest.raises(ValueError, match="Read access denied"):
+            _validate_read_path(target)
+
+
+# ── _validate_dir_path ────────────────────────────────────────────────────
+
+
+class TestValidateDirPath:
+    """Path validation for directory operations."""
+
+    def test_allows_data_path_itself(self, tmp_path):
+        result = _validate_dir_path(str(tmp_path))
+        assert result == os.path.realpath(str(tmp_path))
+
+    def test_allows_subdir_of_data_path(self, tmp_path):
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        result = _validate_dir_path(str(sub))
+        assert result == os.path.realpath(str(sub))
+
+    def test_allows_documents_path(self, tmp_path):
+        docs = tmp_path / "my_docs"
+        docs.mkdir()
+        bash_mod.DOCUMENTS_PATH = str(docs)
+        result = _validate_dir_path(str(docs))
+        assert result == os.path.realpath(str(docs))
+
+    def test_rejects_outside_allowed(self):
+        with pytest.raises(ValueError, match="Directory access denied"):
+            _validate_dir_path("/tmp/random_other_dir")
+
+    def test_rejects_parent_traversal(self, tmp_path):
+        with pytest.raises(ValueError, match="Directory access denied"):
+            _validate_dir_path(str(tmp_path / ".."))
+
+
+# ── _validate_bash_command ────────────────────────────────────────────────
+
+
+class TestValidateBashCommand:
+    """Bash command blocklist and path restriction."""
+
+    def test_allows_safe_command(self, tmp_path):
+        assert _validate_bash_command(f"ls {tmp_path}") is None
+
+    def test_blocks_env_command(self):
+        result = _validate_bash_command("env")
+        assert result is not None
+        assert "env command" in result
+
+    def test_blocks_printenv(self):
+        result = _validate_bash_command("printenv HOME")
+        assert result is not None
+        assert "printenv" in result
+
+    def test_blocks_ps(self):
+        result = _validate_bash_command("ps aux")
+        assert result is not None
+        assert "ps command" in result
+
+    def test_blocks_proc_self_environ(self):
+        result = _validate_bash_command("cat /proc/self/environ")
+        assert result is not None
+        assert "/proc/self/environ" in result
+
+    def test_blocks_etc_passwd(self):
+        result = _validate_bash_command("cat /etc/passwd")
+        assert result is not None
+        assert "/etc/passwd" in result
+
+    def test_blocks_path_outside_allowed(self, tmp_path):
+        result = _validate_bash_command("cat /home/user/secrets.txt")
+        assert result is not None
+        assert "outside allowed directories" in result
+
+    def test_allows_path_within_data_path(self, tmp_path):
+        assert _validate_bash_command(f"cat {tmp_path}/file.txt") is None
+
+    def test_allows_standard_tools(self):
+        assert _validate_bash_command("/usr/bin/wc -l") is None
+        assert _validate_bash_command("/bin/echo hello") is None
+
+
+# ── _get_sandbox_env ──────────────────────────────────────────────────────
+
+
+class TestGetSandboxEnv:
+    """Sandbox environment for subprocess execution."""
+
+    def test_returns_minimal_env(self, tmp_path):
+        bash_mod._SANDBOX_ENV = None  # reset cache
+        env = _get_sandbox_env()
+        assert "PATH" in env
+        assert "LANG" in env
+        assert "DATA_PATH" in env
+        # Should NOT leak host env vars
+        assert "HOME" in env
+        assert env["HOME"] == os.path.realpath(str(tmp_path))
+
+    def test_excludes_host_secrets(self, tmp_path):
+        bash_mod._SANDBOX_ENV = None
+        os.environ["SUPER_SECRET_KEY"] = "should-not-leak"
+        env = _get_sandbox_env()
+        assert "SUPER_SECRET_KEY" not in env
+        del os.environ["SUPER_SECRET_KEY"]
+
+    def test_includes_documents_path_when_set(self, tmp_path):
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        bash_mod.DOCUMENTS_PATH = str(docs)
+        bash_mod._SANDBOX_ENV = None
+        env = _get_sandbox_env()
+        assert "DOCUMENTS_PATH" in env
+        assert env["DOCUMENTS_PATH"] == os.path.realpath(str(docs))
+
+    def test_caches_result(self, tmp_path):
+        bash_mod._SANDBOX_ENV = None
+        env1 = _get_sandbox_env()
+        env2 = _get_sandbox_env()
+        assert env1 == env2
+        assert bash_mod._SANDBOX_ENV is not None

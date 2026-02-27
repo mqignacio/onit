@@ -8,44 +8,122 @@ docker build -t onit .
 
 ## Run the container
 
-**Interactive terminal mode:**
+All examples below pass environment variables inline with `-e`. You can also use `--env-file .env` instead. Mount local directories with `-v host:container:ro` to make documents available inside the container.
+
+### Text mode (interactive terminal)
+
+Minimal:
 
 ```bash
-docker run -it --rm --env-file .env onit
+docker run --name onit --rm \
+  -e ONIT_HOST=<HOST> \
+  -it onit \
+  --model <MODEL>
 ```
 
-**Web UI (Gradio on port 9000):**
+With documents, MCP tools, and a custom prompt:
 
 ```bash
-docker run -it --rm -p 9000:9000 --env-file .env onit --web --web-port 9000
+docker run --name onit --rm \
+  -e ONIT_HOST=<HOST> \
+  -e OLLAMA_API_KEY=<TOKEN> \
+  -e OPENWEATHERMAP_API_KEY=<KEY> \
+  -p 18200-18204:18200-18204 --ipc host \
+  -it -v /path/to/docs:/docs:ro onit \
+  --model <MODEL> \
+  --documents-path /docs/my_topic \
+  --show-logs \
+  --prompt-intro "You are a helpful assistant" \
+  --topic "my topic"
 ```
 
-**A2A server:**
+### Web mode (Gradio UI)
 
 ```bash
-docker run -it --rm -p 9001:9001 --env-file .env onit --a2a --a2a-port 9001
+docker run --name onit --rm \
+  -e ONIT_HOST=<HOST> \
+  -e OLLAMA_API_KEY=<TOKEN> \
+  -e OPENWEATHERMAP_API_KEY=<KEY> \
+  -p 9000:9000 -p 18200-18204:18200-18204 --ipc host \
+  -it -v /path/to/docs:/docs:ro onit \
+  --model <MODEL> \
+  --web --web-port 9000 \
+  --documents-path /docs/my_topic \
+  --show-logs \
+  --prompt-intro "You are a helpful assistant" \
+  --topic "my topic"
 ```
 
-**Telegram gateway:**
+Open `http://localhost:9000` in your browser.
+
+### A2A mode (Agent-to-Agent server)
 
 ```bash
-docker run -it --rm --env-file .env onit --gateway telegram
+docker run --name onit --rm \
+  -e ONIT_HOST=<HOST> \
+  -e OLLAMA_API_KEY=<TOKEN> \
+  -e OPENWEATHERMAP_API_KEY=<KEY> \
+  -p 9001:9001 -p 18200-18204:18200-18204 --ipc host \
+  -it -v /path/to/docs:/docs:ro onit \
+  --model <MODEL> \
+  --a2a --a2a-port 9001 \
+  --documents-path /docs/my_topic \
+  --show-logs \
+  --prompt-intro "You are a helpful assistant" \
+  --topic "my topic"
 ```
 
-Requires `TELEGRAM_BOT_TOKEN` in your `.env` file.
-
-**Viber gateway:**
+Send tasks to the server from another terminal:
 
 ```bash
-docker run -it --rm -p 8443:8443 --env-file .env onit --gateway viber
+docker run --rm -it onit --client --a2a-host http://host.docker.internal:9001 --task "What is the weather?"
 ```
 
-Requires `VIBER_BOT_TOKEN` and `VIBER_WEBHOOK_URL` in your `.env` file. Port 8443 must be exposed for the webhook server.
-
-**With a custom config:**
+### Gateway mode (Telegram)
 
 ```bash
-docker run -it --rm -v $(pwd)/configs:/app/configs --env-file .env onit --config configs/default.yaml
+docker run --name onit --rm \
+  -e ONIT_HOST=<HOST> \
+  -e TELEGRAM_BOT_TOKEN=<TOKEN> \
+  -e OLLAMA_API_KEY=<TOKEN> \
+  -e OPENWEATHERMAP_API_KEY=<KEY> \
+  -p 18200-18204:18200-18204 --ipc host \
+  -it -v /path/to/docs:/docs:ro onit \
+  --model <MODEL> \
+  --documents-path /docs/my_topic \
+  --show-logs \
+  --prompt-intro "You are a helpful assistant" \
+  --gateway telegram \
+  --topic "my topic"
+```
+
+### Gateway mode (Viber)
+
+```bash
+docker run --name onit --rm \
+  -e ONIT_HOST=<HOST> \
+  -e VIBER_BOT_TOKEN=<TOKEN> \
+  -e VIBER_WEBHOOK_URL=<WEBHOOK_URL> \
+  -e OLLAMA_API_KEY=<TOKEN> \
+  -e OPENWEATHERMAP_API_KEY=<KEY> \
+  -p 8443:8443 -p 18200-18204:18200-18204 --ipc host \
+  -it -v /path/to/docs:/docs:ro onit \
+  --model <MODEL> \
+  --documents-path /docs/my_topic \
+  --show-logs \
+  --prompt-intro "You are a helpful assistant" \
+  --gateway viber \
+  --topic "my topic"
+```
+
+Port 8443 must be exposed for the Viber webhook server.
+
+### With a custom config
+
+```bash
+docker run --name onit --rm \
+  -it -v $(pwd)/configs:/app/configs --env-file .env onit \
+  --config configs/default.yaml
 ```
 
 ## Docker Compose

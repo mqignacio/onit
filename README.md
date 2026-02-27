@@ -9,7 +9,7 @@ OnIt is an intelligent agent framework for task automation and assistance. It is
 ### 1. Install
 
 ```bash
-pip install onit==0.1.3a
+pip install onit==0.1.3b
 ```
 
 Or from source:
@@ -108,6 +108,8 @@ The LLM provider is auto-detected from the host URL. If it contains `openrouter.
 | `--verbose` | Enable verbose logging | `false` |
 | `--timeout` | Request timeout in seconds (`-1` = none) | `600` |
 | `--template-path` | Path to custom prompt template YAML file | — |
+| `--documents-path` | Path to local documents directory (model searches here before the web) | — |
+| `--topic` | Default topic context (e.g. `"machine learning"`) | — |
 | `--prompt-intro` | Custom system prompt intro for the model | `"I am a helpful AI assistant. My name is OnIt."` |
 
 **Text UI:**

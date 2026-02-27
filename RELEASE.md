@@ -1,5 +1,26 @@
 # Release Notes
 
+## v0.1.3b
+
+### Security
+
+- **Sandboxed Shell Execution** — The bash MCP tool now runs commands in a minimal, isolated environment that strips all inherited environment variables (API keys, tokens, etc.). Only essential variables (`PATH`, `LANG`, `HOME`, `DATA_PATH`, `DOCUMENTS_PATH`) are exposed.
+- **Command Blocklist** — Blocked dangerous commands (`env`, `printenv`, `ps`, `top`) and access to sensitive system files (`/etc/passwd`, `/etc/shadow`, `/proc/self/environ`).
+- **Path Restriction Enforcement** — All file read, write, directory listing, and bash operations are now validated against allowed directories (`DATA_PATH` and `DOCUMENTS_PATH`). Symlink traversal attacks are prevented using `os.path.realpath()`.
+- **Read Path Validation** — Added `_validate_read_path()` and `_validate_dir_path()` to enforce read access boundaries on all file tools (`read_file`, `send_file`, `search_document`, `search_directory`, `extract_tables`, `find_files`, `transform_text`, `get_document_context`).
+
+### Improvements
+
+- **Unified `--show-logs` Flag** — Consolidated `--text-show-logs` and `--gateway-show-logs` into a single `--show-logs` flag that works across all modes (text, web, gateway).
+- **Documents Path Propagation** — `--documents-path` is now propagated to MCP servers via the `ONIT_DOCUMENTS_PATH` environment variable, making mounted documents accessible in Docker deployments.
+- **Telegram Concurrency** — Increased Telegram gateway concurrent updates limit from `True` (unbounded) to `256` for better resource control.
+- **Docker Documentation** — Comprehensive Docker run examples for all modes (text, web, A2A, Telegram gateway, Viber gateway) with inline environment variables, volume mounts, and MCP port mappings.
+
+### Bug Fixes
+
+- Removed unused `gateway_show_logs` field from `OnIt` model — gateway now uses the unified `show_logs` setting.
+- Removed stale `configs/default.yaml` and `docs/GOOGLE_WORKSPACE_AND_OAUTH.md`.
+
 ## v0.1.3a
 
 ### New Features
