@@ -21,10 +21,15 @@ If not, it will fall back to standard print statements.
 
 '''
 import asyncio
+import json
 import sys
-import tty
-import termios
 import threading
+
+if sys.platform != "win32":
+    import tty
+    import termios
+else:
+    import msvcrt
 from collections import deque
 from dataclasses import dataclass
 from rich.console import Console
@@ -37,6 +42,7 @@ from rich.status import Status
 from rich.box import Box
 from rich.box import ROUNDED, HEAVY
 from datetime import datetime
+import re
 
 from typing import Callable, Optional, Any, Literal, Union
 
@@ -55,10 +61,11 @@ HORIZONTAL_THICK = Box(
 @dataclass
 class Message:
     """Strongly typed message structure"""
-    role: Literal["user", "assistant", "system"]
+    role: Literal["user", "assistant", "system", "tool_call", "tool_result"]
     content: str
     timestamp: str
     elapsed: str = ""
+    name: str = ""
 
 class ChatUI:
     def __init__(
@@ -123,6 +130,13 @@ class ChatUI:
         ]
         self._spinner_step = 0
         self._spinner_timer: Optional[threading.Timer] = None
+        self._thinking_stop_event: Optional[threading.Event] = None
+        self._thinking_thread: Optional[threading.Thread] = None
+        self._stream_header_printed = False  # lazy: header deferred until first visible token
+        self._stream_pending = ""  # buffer tokens until first non-whitespace
+        self._stream_think_started = False  # True while a think block is open
+        self._tag_buf = ""  # buffer for partial tag detection across tokens
+        self._trail_buf = ""  # buffer whitespace-only tokens to suppress trailing blank lines
         self.initialize()
         
     def set_theme(self, theme: str) -> None:
@@ -214,6 +228,25 @@ class ChatUI:
             self.messages.extend(messages_to_keep)
         else:
             self.messages.clear()
+
+    def add_tool_call(self, name: str, arguments: dict) -> None:
+        """Add a tool invocation message inline in the chat history."""
+        self.messages.append(Message(
+            role="tool_call",
+            content=json.dumps(arguments),
+            timestamp=self.format_timestamp(),
+            name=name,
+        ))
+
+    def add_tool_result(self, name: str, result: str, truncate: int = 300) -> None:
+        """Add a tool result message inline in the chat history."""
+        display = result if len(result) <= truncate else result[:truncate] + "…"
+        self.messages.append(Message(
+            role="tool_result",
+            content=display,
+            timestamp=self.format_timestamp(),
+            name=name,
+        ))
 
     def add_log(
         self,
@@ -327,8 +360,14 @@ class ChatUI:
                 msg_time = msg.timestamp if isinstance(msg, Message) else msg["time"]
                 msg_elapsed = msg.elapsed if isinstance(msg, Message) else msg.get("elapsed", "")
 
+                msg_name = msg.name if isinstance(msg, Message) else msg.get("name", "")
+
                 if role == "user":
                     self._render_user_message(content, msg_content, msg_time)
+                elif role == "tool_call":
+                    self._render_tool_call_message(content, msg_name, msg_content, msg_time)
+                elif role == "tool_result":
+                    self._render_tool_result_message(content, msg_name, msg_content, msg_time)
                 else:
                     self._render_assistant_message(content, msg_content, msg_time, msg_elapsed)
 
@@ -372,6 +411,18 @@ class ChatUI:
             padding=(1, 0)
         )
 
+    def _render_tool_call_message(self, content: Text, name: str, args_str: str, msg_time: str) -> None:
+        content.append(f"┌─ ⚙️  {name} ", style="bold dark_orange3")
+        content.append(f"[{msg_time}]\n", style=self.theme.styles.get("timestamp", "cyan"))
+        content.append(f"{args_str}\n", style="dim white")
+        content.append("└" + "─" * 40 + "\n", style="dark_orange3")
+
+    def _render_tool_result_message(self, content: Text, name: str, result_str: str, msg_time: str) -> None:
+        content.append(f"┌─ ↩  {name} ", style="bold green")
+        content.append(f"[{msg_time}]\n", style=self.theme.styles.get("timestamp", "cyan"))
+        content.append(f"{result_str}\n", style="dim white")
+        content.append("└" + "─" * 40 + "\n", style="green")
+
     def _render_user_message(self, content: Text, msg_content: str, msg_time: str) -> None:
         """
         Render a user message to the content Text object.
@@ -397,11 +448,10 @@ class ChatUI:
             msg_elapsed: The elapsed time string (optional)
         """
         content.append(f"┌─ 🤖 AI ", style=self.theme.styles.get("assistant", "bold magenta"))
-        content.append(f"[{msg_time}] - ", style=self.theme.styles.get("timestamp", "dim magenta"))
+        content.append(f"[{msg_time}]", style=self.theme.styles.get("timestamp", "dim magenta"))
         if msg_elapsed:
-            content.append(f"{msg_elapsed}\n", style=self.theme.styles.get("warning", "dim magenta"))
-        else:
-            content.append("\n", style=self.theme.styles.get("warning", "dim magenta"))
+            content.append(f" - {msg_elapsed}", style=self.theme.styles.get("warning", "dim magenta"))
+        content.append("\n", style=self.theme.styles.get("warning", "dim magenta"))
         content.append(f"{msg_content}\n", style="bright_white")
         content.append("└" + "─" * 40 + "\n", style=self.theme.styles.get("assistant", "magenta"))
 
@@ -466,6 +516,181 @@ class ChatUI:
             # Silently fail - status stopping is not critical
             pass
 
+    def _start_thinking_spinner(self) -> None:
+        """Start a background thread that shows an animated spinner with rotating messages."""
+        self._thinking_stop_event = threading.Event()
+
+        _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+        def _animate() -> None:
+            msg_idx = 0
+            frame_idx = 0
+            ticks = 0
+            while True:
+                frame = _FRAMES[frame_idx % len(_FRAMES)]
+                msg = self._spinner_messages[msg_idx % len(self._spinner_messages)]
+                line = f"\r\033[1;34m{frame} {msg}\033[0m\033[K"
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                frame_idx += 1
+                ticks += 1
+                # Rotate message every ~30 frames (~2.4s at 80ms/frame)
+                if ticks % 30 == 0:
+                    msg_idx += 1
+                if self._thinking_stop_event.wait(0.08):
+                    break
+
+        self._thinking_thread = threading.Thread(target=_animate, daemon=True)
+        self._thinking_thread.start()
+
+    def _stop_thinking_spinner(self) -> None:
+        """Stop the rotating thinking display and clear the line."""
+        if self._thinking_stop_event:
+            self._thinking_stop_event.set()
+            self._thinking_stop_event = None
+        if self._thinking_thread:
+            self._thinking_thread.join(timeout=1.0)
+            self._thinking_thread = None
+        # Erase the entire current line so no spinner artifacts remain
+        sys.stdout.write("\r\033[2K")
+        sys.stdout.flush()
+
+    def start_thinking(self) -> None:
+        """Public API: start the animated thinking spinner."""
+        self._start_thinking_spinner()
+
+    def stop_thinking(self) -> None:
+        """Public API: stop the animated thinking spinner."""
+        self._stop_thinking_spinner()
+
+    # ── Inline tool-call display (streaming mode) ──────────────────
+
+    def show_tool_start(self, name: str, arguments: dict) -> None:
+        """Print a bordered tool-call block inline (mirrors chat history style)."""
+        ts = self.format_timestamp()
+        args_str = json.dumps(arguments, ensure_ascii=False)
+        t = Text()
+        t.append(f"┌─ ⚙️  {name} ", style="bold dark_orange3")
+        t.append(f"[{ts}]\n", style=self.theme.styles.get("timestamp", "cyan"))
+        t.append(f"{args_str}\n", style="dim white")
+        t.append("└" + "─" * 40, style="dark_orange3")
+        self.console.print(t)
+
+    def start_tool_spinner(self, name: str, arguments: dict) -> None:
+        pass  # Bordered output provides visual feedback; spinner not needed here
+
+    def stop_tool_spinner(self) -> None:
+        pass
+
+    def show_tool_done(self, name: str, result: str, success: bool = True) -> None:
+        """Print a bordered tool-result block inline (mirrors chat history style)."""
+        ts = self.format_timestamp()
+        display = result if len(result) <= 300 else result[:300] + "…"
+        border_style = "bold green" if success else "bold red"
+        t = Text()
+        t.append(f"┌─ ↩  {name} ", style=border_style)
+        t.append(f"[{ts}]\n", style=self.theme.styles.get("timestamp", "cyan"))
+        t.append(f"{display}\n", style="dim white")
+        t.append("└" + "─" * 40, style="green" if success else "red")
+        self.console.print(t)
+
+    # ── Token streaming ───────────────────────────────────────────
+
+    def stream_start(self) -> None:
+        """Prepare for streaming. Resets all stream state; header is deferred lazily."""
+        self.stop_status()  # safety: stop spinner if running
+        self._stop_thinking_spinner()  # stop rotating lobby messages
+        self._streaming_content = ""
+        self._stream_header_printed = False
+        self._stream_pending = ""
+        self._stream_think_started = False
+        self._tag_buf = ""
+
+    def stream_think_token(self, token: str) -> None:
+        """Print a reasoning/thinking token in dim italic, opening a think block if needed."""
+        if not self._stream_think_started:
+            self._stream_think_started = True
+            self.console.print(
+                f"┌─ 💭 Thinking [{self.format_timestamp()}]",
+                style="dim italic",
+            )
+        print(f"\033[2m\033[3m{token}\033[0m", end="", flush=True)
+
+    def stream_think_end(self) -> None:
+        """Close the thinking block if it is open."""
+        if self._stream_think_started:
+            print()  # newline after last think token
+            self.console.print("└" + "─" * 40, style="dim")
+            self._stream_think_started = False
+
+    def stream_token(self, token: str) -> None:
+        """Stream an answer token. Auto-closes any open think block on first call."""
+        self._streaming_content += token
+        if self._stream_think_started:
+            self.stream_think_end()  # reasoning just finished, close think block
+        display = self._filter_display_token(token)
+        if not display:
+            return
+        if not self._stream_header_printed:
+            self._stream_pending += display
+            if self._stream_pending.strip():
+                # First real answer content — print header then flush buffer
+                self._stream_header_printed = True
+                self.console.print(
+                    f"┌─ 🤖 AI [{self.format_timestamp()}]",
+                    style=self.theme.styles.get("assistant", "bold magenta"),
+                )
+                print(self._stream_pending.lstrip(), end="", flush=True)
+                self._stream_pending = ""
+        else:
+            if display.strip():
+                # Non-whitespace: flush any buffered trailing whitespace then print
+                if self._trail_buf:
+                    print(self._trail_buf, end="", flush=True)
+                    self._trail_buf = ""
+                print(display, end="", flush=True)
+            else:
+                # Whitespace-only token: buffer it; discard if stream ends before real content
+                self._trail_buf += display
+
+    def _filter_display_token(self, token: str) -> str:
+        """Strip <answer>/<answer> wrapper tags, buffering a partial '<' across tokens."""
+        buf = self._tag_buf + token
+        buf = buf.replace("<answer>", "").replace("</answer>", "")
+        if buf.endswith("<"):
+            self._tag_buf = "<"
+            return buf[:-1]
+        self._tag_buf = ""
+        return buf
+
+    def stream_end(self, elapsed: str = "") -> None:
+        """Close the streamed block. Message saving is handled by onit.py (has correct elapsed)."""
+        self.stream_think_end()  # close think block if still open
+        if not self._stream_header_printed:
+            # Only whitespace or tool-call-only response — skip the empty block
+            self._streaming_content = ""
+            self._stream_pending = ""
+            self._trail_buf = ""
+            self._tag_buf = ""
+            return
+        # Discard trailing whitespace — just emit a single newline before the footer
+        self._trail_buf = ""
+        print()  # final newline after the last token
+        footer = "└" + "─" * 40
+        if elapsed:
+            footer += f"  {elapsed}"
+        self.console.print(footer, style=self.theme.styles.get("assistant", "magenta"))
+        # Save to history so intermediate AI turns appear in the chat panel.
+        # Strip all XML-style tags (same as remove_tags) so the final turn's
+        # content matches onit.py's comparison and gets elapsed time updated.
+        content = re.sub(r"<[^>]+>", "", self._streaming_content).strip()
+        if content:
+            self.add_message("assistant", content)
+        self._streaming_content = ""
+        self._stream_pending = ""
+        self._tag_buf = ""
+        self._stream_header_printed = False
+
     def render(self, thinking: bool = False) -> Union[Panel, None]:
         """
         Render complete layout including chat messages and optionally execution logs.
@@ -505,8 +730,15 @@ class ChatUI:
         self.console.print(Align.center(Text("OnIt may produce inaccurate information. Verify important details independently.", style="dim italic")))
     
     def _input_with_history(self, prompt: str = "➤ ") -> str:
+        """Dispatch to the platform-appropriate raw-input implementation."""
+        if sys.platform == "win32":
+            return self._input_with_history_windows(prompt)
+        return self._input_with_history_unix(prompt)
+
+    def _input_with_history_unix(self, prompt: str = "➤ ") -> str:
         """
         Get user input with history navigation using up/down arrow keys.
+        Uses termios/tty for raw terminal control (Unix/Linux/macOS only).
 
         Args:
             prompt: The prompt string to display
@@ -519,10 +751,10 @@ class ChatUI:
         sys.stdout.flush()
 
         fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
+        old_settings = termios.tcgetattr(fd)  # type: ignore[name-defined]
 
         try:
-            tty.setraw(fd)
+            tty.setraw(fd)  # type: ignore[name-defined]
 
             current_input = []
             cursor_pos = 0
@@ -638,12 +870,128 @@ class ChatUI:
                     sys.stdout.flush()
 
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)  # type: ignore[name-defined]
+
+    def _input_with_history_windows(self, prompt: str = "➤ ") -> str:
+        """
+        Get user input with history navigation using up/down arrow keys.
+        Uses msvcrt for raw character reading (Windows only).
+
+        Arrow keys on Windows emit two bytes via msvcrt.getwch():
+          prefix \x00 or \xe0, then a scan code:
+            \x48 = Up, \x50 = Down, \x4d = Right, \x4b = Left, \x53 = Delete
+
+        Args:
+            prompt: The prompt string to display
+
+        Returns:
+            The user's input string
+        """
+        sys.stdout.write(f"\033[1;32m{prompt}\033[0m")  # Bold green prompt
+        sys.stdout.flush()
+
+        current_input = []
+        cursor_pos = 0
+        temp_history_index = -1
+        saved_input = ""
+
+        while True:
+            char = msvcrt.getwch()
+
+            if char in ('\r', '\n'):  # Enter key
+                sys.stdout.write('\r\n')
+                sys.stdout.flush()
+                result = ''.join(current_input)
+                if result.strip() and (not self.input_history or self.input_history[-1] != result):
+                    self.input_history.append(result)
+                self.history_index = -1
+                return result
+
+            elif char == '\x03':  # Ctrl+C
+                sys.stdout.write('\r\n')
+                sys.stdout.flush()
+                raise KeyboardInterrupt
+
+            elif char == '\x04':  # Ctrl+D
+                sys.stdout.write('\r\n')
+                sys.stdout.flush()
+                raise EOFError
+
+            elif char in ('\x00', '\xe0'):  # Special key prefix (arrows, Delete, etc.)
+                scan = msvcrt.getwch()
+
+                if scan == '\x48':  # Up arrow
+                    if self.input_history:
+                        if temp_history_index == -1:
+                            saved_input = ''.join(current_input)
+                            temp_history_index = len(self.input_history) - 1
+                        elif temp_history_index > 0:
+                            temp_history_index -= 1
+
+                        if temp_history_index >= 0:
+                            sys.stdout.write('\r' + ' ' * (len(prompt) + len(current_input) + 5) + '\r')
+                            sys.stdout.write(f"\033[1;32m{prompt}\033[0m")
+                            current_input = list(self.input_history[temp_history_index])
+                            cursor_pos = len(current_input)
+                            sys.stdout.write(''.join(current_input))
+                            sys.stdout.flush()
+
+                elif scan == '\x50':  # Down arrow
+                    if temp_history_index != -1:
+                        temp_history_index += 1
+                        sys.stdout.write('\r' + ' ' * (len(prompt) + len(current_input) + 5) + '\r')
+                        sys.stdout.write(f"\033[1;32m{prompt}\033[0m")
+
+                        if temp_history_index >= len(self.input_history):
+                            temp_history_index = -1
+                            current_input = list(saved_input)
+                        else:
+                            current_input = list(self.input_history[temp_history_index])
+
+                        cursor_pos = len(current_input)
+                        sys.stdout.write(''.join(current_input))
+                        sys.stdout.flush()
+
+                elif scan == '\x4d':  # Right arrow
+                    if cursor_pos < len(current_input):
+                        cursor_pos += 1
+                        sys.stdout.write('\033[C')
+                        sys.stdout.flush()
+
+                elif scan == '\x4b':  # Left arrow
+                    if cursor_pos > 0:
+                        cursor_pos -= 1
+                        sys.stdout.write('\033[D')
+                        sys.stdout.flush()
+
+                elif scan == '\x53':  # Delete key
+                    if cursor_pos < len(current_input):
+                        del current_input[cursor_pos]
+                        sys.stdout.write(''.join(current_input[cursor_pos:]) + ' ')
+                        sys.stdout.write('\033[' + str(len(current_input) - cursor_pos + 1) + 'D')
+                        sys.stdout.flush()
+
+            elif char in ('\x7f', '\x08'):  # Backspace
+                if cursor_pos > 0:
+                    cursor_pos -= 1
+                    del current_input[cursor_pos]
+                    sys.stdout.write('\b' + ''.join(current_input[cursor_pos:]) + ' ')
+                    sys.stdout.write('\033[' + str(len(current_input) - cursor_pos + 1) + 'D')
+                    sys.stdout.flush()
+
+            elif char >= ' ' and char <= '~':  # Printable characters
+                current_input.insert(cursor_pos, char)
+                cursor_pos += 1
+                sys.stdout.write(char + ''.join(current_input[cursor_pos:]))
+                if cursor_pos < len(current_input):
+                    sys.stdout.write('\033[' + str(len(current_input) - cursor_pos) + 'D')
+                sys.stdout.flush()
 
     def get_user_input(self) -> str:
         """Get user input from the console with history support (up/down arrows)"""
         self.stop_status()
         while True:
+            self.console.clear()
             self.console.print(self.render())
             self.console.print(Align.center(Text("OnIt may produce inaccurate information. Verify important details independently.", style="dim italic")))
             try:
@@ -652,11 +1000,11 @@ class ChatUI:
                 self.add_message("user", user_input)
                 self.console.clear()
 
-                # Show thinking indicator
+                # Show panel with the user's message, then a plain (non-Live)
+                # thinking indicator so the console is free for streaming tokens.
                 self.console.print(self.render())
                 self.console.print(Align.center(Text("OnIt may produce inaccurate information. Verify important details independently.", style="dim italic")))
                 self.console.print()
-                self.start_status()
                 return user_input
             # capture control-d
             except EOFError:
