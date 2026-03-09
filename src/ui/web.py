@@ -789,6 +789,8 @@ class WebChatUI:
 
                             def _on_tool_status(status_text):
                                 s.tool_status = status_text
+                                if status_text:
+                                    s.streaming_active = False
 
                             _stats = {}
                             _task_start = time.monotonic()
