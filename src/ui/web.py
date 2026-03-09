@@ -264,6 +264,7 @@ class WebSession:
     created: datetime = field(default_factory=datetime.now)
     streaming_content: str = ""
     streaming_active: bool = False
+    tool_status: str = ""  # current tool activity description (e.g. "Searching the web...")
 
 
 class WebChatUI:
@@ -786,6 +787,9 @@ class WebChatUI:
                                 s.streaming_content = full_content
                                 s.streaming_active = True
 
+                            def _on_tool_status(status_text):
+                                s.tool_status = status_text
+
                             _stats = {}
                             _task_start = time.monotonic()
                             response = await self._onit.process_task(
@@ -795,10 +799,12 @@ class WebChatUI:
                                 safety_queue=s.safety_queue,
                                 stream_callback=_on_stream_token,
                                 stats=_stats,
+                                tool_status_callback=_on_tool_status,
                             )
                             _task_elapsed = time.monotonic() - _task_start
                             s.streaming_active = False
                             s.streaming_content = ""
+                            s.tool_status = ""
                             tok_s = _stats.get("tokens_per_second", 0)
                             if response:
                                 display, file_paths = self._extract_file_paths(
@@ -834,6 +840,7 @@ class WebChatUI:
                         finally:
                             s.streaming_active = False
                             s.streaming_content = ""
+                            s.tool_status = ""
                             s.processing = False
 
                     asyncio.run_coroutine_threadsafe(_run_task(), self._loop)
@@ -896,9 +903,15 @@ class WebChatUI:
                         if spinner_text_changed:
                             session.spinner_tick = 0
                             session.spinner_step += 1
-                        status_msg = self._spinner_messages[
-                            session.spinner_step % len(self._spinner_messages)
-                        ]
+                        # Use tool status if available, otherwise fall back to generic spinner
+                        if session.tool_status:
+                            status_msg = session.tool_status
+                            # Always update when tool status is active (it may change rapidly)
+                            spinner_text_changed = True
+                        else:
+                            status_msg = self._spinner_messages[
+                                session.spinner_step % len(self._spinner_messages)
+                            ]
                         # Only update chatbot when spinner first appears or text changes
                         if not session.spinner_shown or spinner_text_changed:
                             spinner_msg = gr.ChatMessage(

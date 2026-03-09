@@ -64,11 +64,12 @@ class StreamingAdapter:
     """
 
     def __init__(self, on_token=None, on_complete=None, show_logs=False,
-                 throttle_tokens=0):
+                 throttle_tokens=0, on_tool_status=None):
         self.on_token = on_token
         self.on_complete = on_complete
         self.show_logs = show_logs
         self._throttle_tokens = throttle_tokens
+        self._on_tool_status = on_tool_status
         self._content = ""
         self._tag_buf = ""
         self._token_count = 0
@@ -150,12 +151,16 @@ class StreamingAdapter:
             print(f"{name}({arguments})")
 
     def start_tool_spinner(self, name, arguments):
-        pass
+        if self._on_tool_status:
+            self._on_tool_status(f"{name}({arguments})")
 
     def stop_tool_spinner(self):
-        pass
+        if self._on_tool_status:
+            self._on_tool_status("")
 
     def show_tool_done(self, name, result, success=True):
+        if self._on_tool_status:
+            self._on_tool_status("")
         if self.show_logs:
             truncated = result[:500] + "..." if len(result) > 500 else result
             print(f"{name} returned: {truncated}")
@@ -626,7 +631,8 @@ class OnIt(BaseModel):
                            safety_queue: asyncio.Queue | None = None,
                            stream_callback=None,
                            stream_throttle: int = 0,
-                           stats: dict | None = None) -> str:
+                           stats: dict | None = None,
+                           tool_status_callback=None) -> str:
         """Process a single task and return the response string.
 
         Args:
@@ -640,6 +646,8 @@ class OnIt(BaseModel):
                 updates to their clients (web UI, A2A, etc.).
             stream_throttle: When > 0, only invoke ``stream_callback`` every N
                 tokens to avoid flooding (useful for A2A SSE).
+            tool_status_callback: Optional callback ``(status_text) -> None``
+                called when a tool starts/stops to show activity indicators.
         """
         # Use per-chat overrides if provided, otherwise fall back to instance defaults
         effective_session_path = session_path or self.session_path
@@ -661,14 +669,14 @@ class OnIt(BaseModel):
             })
             instruction = instruction.messages[0].content.text
 
-        # When a stream_callback is provided and streaming is enabled,
-        # use a StreamingAdapter so chat() delivers tokens incrementally.
+        # Use a StreamingAdapter when streaming tokens or tracking tool status.
         _adapter = None
-        if stream_callback and self.stream:
+        if (stream_callback and self.stream) or tool_status_callback:
             _adapter = StreamingAdapter(
-                on_token=stream_callback,
+                on_token=stream_callback if self.stream else None,
                 show_logs=self.show_logs,
                 throttle_tokens=stream_throttle,
+                on_tool_status=tool_status_callback,
             )
 
         kwargs = {
