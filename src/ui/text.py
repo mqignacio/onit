@@ -566,12 +566,14 @@ class ChatUI:
 
     def _stop_thinking_spinner(self) -> None:
         """Stop the rotating thinking display and clear the line."""
-        if self._thinking_stop_event:
-            self._thinking_stop_event.set()
-            self._thinking_stop_event = None
-        if self._thinking_thread:
-            self._thinking_thread.join(timeout=1.0)
-            self._thinking_thread = None
+        stop_event = self._thinking_stop_event
+        thread = self._thinking_thread
+        if stop_event:
+            stop_event.set()
+        if thread:
+            thread.join(timeout=1.0)
+        self._thinking_stop_event = None
+        self._thinking_thread = None
         # Erase the entire current line and restore blinking bar cursor
         sys.stdout.write("\r\033[2K\033[?25h\033[5 q")
         sys.stdout.flush()
