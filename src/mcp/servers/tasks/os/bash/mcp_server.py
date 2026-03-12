@@ -203,49 +203,40 @@ def _get_sandbox_env() -> dict:
     tmp_dir = os.path.join(abs_data, "tmp")
     _secure_makedirs(tmp_dir)
 
+    env = {
+        "TERM": "dumb",
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8",
+        "HOME": abs_data,
+        "TMPDIR": tmp_dir,
+        "DATA_PATH": abs_data,
+    }
+
     if IS_WINDOWS:
         # Build PATH that includes Git Bash Unix tools + essential Windows paths
         path_parts = []
         # Git Bash provides Unix coreutils (wc, grep, sed, awk, etc.)
         if _BASH_EXE:
-            git_usr_bin = os.path.join(os.path.dirname(os.path.dirname(_BASH_EXE)), "usr", "bin")
-            if os.path.isdir(git_usr_bin):
-                path_parts.append(git_usr_bin)
-            git_bin = os.path.join(os.path.dirname(os.path.dirname(_BASH_EXE)), "bin")
-            if os.path.isdir(git_bin):
-                path_parts.append(git_bin)
-            git_mingw_bin = os.path.join(os.path.dirname(os.path.dirname(_BASH_EXE)), "mingw64", "bin")
-            if os.path.isdir(git_mingw_bin):
-                path_parts.append(git_mingw_bin)
+            git_root = os.path.dirname(os.path.dirname(_BASH_EXE))
+            for subdir in ("usr/bin", "bin", "mingw64/bin"):
+                d = os.path.join(git_root, subdir)
+                if os.path.isdir(d):
+                    path_parts.append(d)
         # Essential Windows system paths (for python, pip, etc.)
+        sys_root = os.environ.get("SystemRoot", r"C:\Windows")
         path_parts.extend([
-            os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"),
-            os.path.join(os.environ.get("SystemRoot", r"C:\Windows")),
+            os.path.join(sys_root, "System32"),
+            sys_root,
         ])
-        sandbox_path = os.pathsep.join(path_parts)
-        env = {
-            "TERM": "dumb",
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8",
-            "HOME": abs_data,
-            "TMPDIR": tmp_dir,
+        env.update({
             "TEMP": tmp_dir,
             "TMP": tmp_dir,
-            "PATH": sandbox_path,
-            "DATA_PATH": abs_data,
-            "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
+            "PATH": os.pathsep.join(path_parts),
+            "SystemRoot": sys_root,
             "COMSPEC": os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe"),
-        }
+        })
     else:
-        env = {
-            "TERM": "dumb",
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8",
-            "HOME": abs_data,
-            "TMPDIR": tmp_dir,
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "DATA_PATH": abs_data,
-        }
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 
     if DOCUMENTS_PATH:
         env["DOCUMENTS_PATH"] = os.path.realpath(os.path.expanduser(DOCUMENTS_PATH))
@@ -257,71 +248,86 @@ def _get_sandbox_env() -> dict:
 # Blocked command patterns for the bash tool
 _BLOCKED_PATTERNS = [
     # Environment variable access
-    (r'\benv\b', "env command"),
-    (r'\bprintenv\b', "printenv command"),
-    (r'\bexport\s', "export command"),
-    (r'/proc/self/environ', "/proc/self/environ"),
+    (re.compile(r'\benv\b', re.IGNORECASE), "env command"),
+    (re.compile(r'\bprintenv\b', re.IGNORECASE), "printenv command"),
+    (re.compile(r'\bexport\s', re.IGNORECASE), "export command"),
+    (re.compile(r'/proc/self/environ', re.IGNORECASE), "/proc/self/environ"),
     # Process listings
-    (r'\bps\b', "ps command"),
-    (r'\btop\b', "top command"),
-    (r'\bhtop\b', "htop command"),
-    (r'/proc/\d+', "/proc access"),
-    (r'/proc/self\b', "/proc/self access"),
+    (re.compile(r'\bps\b', re.IGNORECASE), "ps command"),
+    (re.compile(r'\btop\b', re.IGNORECASE), "top command"),
+    (re.compile(r'\bhtop\b', re.IGNORECASE), "htop command"),
+    (re.compile(r'/proc/\d+', re.IGNORECASE), "/proc access"),
+    (re.compile(r'/proc/self\b', re.IGNORECASE), "/proc/self access"),
     # Sensitive system files
-    (r'/etc/passwd', "/etc/passwd"),
-    (r'/etc/shadow', "/etc/shadow"),
-    (r'/etc/sudoers', "/etc/sudoers"),
+    (re.compile(r'/etc/passwd', re.IGNORECASE), "/etc/passwd"),
+    (re.compile(r'/etc/shadow', re.IGNORECASE), "/etc/shadow"),
+    (re.compile(r'/etc/sudoers', re.IGNORECASE), "/etc/sudoers"),
     # Destructive filesystem operations
-    (r'\brm\s+(-[^\s]*\s+)*-r\s*f?\s+/', "rm -rf on root"),
-    (r'\brm\s+(-[^\s]*\s+)*-f\s*r?\s+/', "rm -rf on root"),
-    (r'\brm\s+(-[^\s]*\s+)*/\s*$', "rm on root"),
-    (r'>\s*/dev/(sd|hd|nvme|vd|xvd)', "write to block device"),
-    (r'>\s*/dev/mem', "write to /dev/mem"),
-    (r'\bdd\b.*\bof\s*=\s*/dev/', "dd to device"),
-    (r'\bmkfs\b', "mkfs command"),
-    (r'\bfdisk\b', "fdisk command"),
-    (r'\bparted\b', "parted command"),
+    (re.compile(r'\brm\s+(-[^\s]*\s+)*-r\s*f?\s+/', re.IGNORECASE), "rm -rf on root"),
+    (re.compile(r'\brm\s+(-[^\s]*\s+)*-f\s*r?\s+/', re.IGNORECASE), "rm -rf on root"),
+    (re.compile(r'\brm\s+(-[^\s]*\s+)*/\s*$', re.IGNORECASE), "rm on root"),
+    (re.compile(r'>\s*/dev/(sd|hd|nvme|vd|xvd)', re.IGNORECASE), "write to block device"),
+    (re.compile(r'>\s*/dev/mem', re.IGNORECASE), "write to /dev/mem"),
+    (re.compile(r'\bdd\b.*\bof\s*=\s*/dev/', re.IGNORECASE), "dd to device"),
+    (re.compile(r'\bmkfs\b', re.IGNORECASE), "mkfs command"),
+    (re.compile(r'\bfdisk\b', re.IGNORECASE), "fdisk command"),
+    (re.compile(r'\bparted\b', re.IGNORECASE), "parted command"),
     # Privilege escalation
-    (r'\bsudo\b', "sudo command"),
-    (r'\bsu\b\s', "su command"),
-    (r'\bdoas\b', "doas command"),
-    (r'\bchmod\s+[0-7]*s', "setuid/setgid chmod"),
-    (r'\bchown\b', "chown command"),
+    (re.compile(r'\bsudo\b', re.IGNORECASE), "sudo command"),
+    (re.compile(r'\bsu\b\s', re.IGNORECASE), "su command"),
+    (re.compile(r'\bdoas\b', re.IGNORECASE), "doas command"),
+    (re.compile(r'\bchmod\s+[0-7]*s', re.IGNORECASE), "setuid/setgid chmod"),
+    (re.compile(r'\bchown\b', re.IGNORECASE), "chown command"),
     # System state / shutdown
-    (r'\bshutdown\b', "shutdown command"),
-    (r'\breboot\b', "reboot command"),
-    (r'\bpoweroff\b', "poweroff command"),
-    (r'\bhalt\b', "halt command"),
-    (r'\binit\s+[06]\b', "init runlevel change"),
-    (r'\bsystemctl\s+(start|stop|restart|disable|enable|mask|reboot|poweroff|halt)', "systemctl service control"),
+    (re.compile(r'\bshutdown\b', re.IGNORECASE), "shutdown command"),
+    (re.compile(r'\breboot\b', re.IGNORECASE), "reboot command"),
+    (re.compile(r'\bpoweroff\b', re.IGNORECASE), "poweroff command"),
+    (re.compile(r'\bhalt\b', re.IGNORECASE), "halt command"),
+    (re.compile(r'\binit\s+[06]\b', re.IGNORECASE), "init runlevel change"),
+    (re.compile(r'\bsystemctl\s+(start|stop|restart|disable|enable|mask|reboot|poweroff|halt)', re.IGNORECASE), "systemctl service control"),
     # Network / exfiltration
-    (r'\bcurl\b.*\|\s*(ba)?sh', "curl piped to shell"),
-    (r'\bwget\b.*\|\s*(ba)?sh', "wget piped to shell"),
-    (r'\bnc\b\s+-[el]', "netcat listener"),
-    (r'\bncat\b', "ncat command"),
-    (r'\bsocat\b', "socat command"),
-    (r'\biptables\b', "iptables command"),
-    (r'\bufw\b', "ufw command"),
+    (re.compile(r'\bcurl\b.*\|\s*(ba)?sh', re.IGNORECASE), "curl piped to shell"),
+    (re.compile(r'\bwget\b.*\|\s*(ba)?sh', re.IGNORECASE), "wget piped to shell"),
+    (re.compile(r'\bnc\b\s+-[el]', re.IGNORECASE), "netcat listener"),
+    (re.compile(r'\bncat\b', re.IGNORECASE), "ncat command"),
+    (re.compile(r'\bsocat\b', re.IGNORECASE), "socat command"),
+    (re.compile(r'\biptables\b', re.IGNORECASE), "iptables command"),
+    (re.compile(r'\bufw\b', re.IGNORECASE), "ufw command"),
     # Kernel / boot
-    (r'\binsmod\b', "insmod command"),
-    (r'\brmmod\b', "rmmod command"),
-    (r'\bmodprobe\b', "modprobe command"),
-    (r'\bsysctl\s+-w\b', "sysctl write"),
+    (re.compile(r'\binsmod\b', re.IGNORECASE), "insmod command"),
+    (re.compile(r'\brmmod\b', re.IGNORECASE), "rmmod command"),
+    (re.compile(r'\bmodprobe\b', re.IGNORECASE), "modprobe command"),
+    (re.compile(r'\bsysctl\s+-w\b', re.IGNORECASE), "sysctl write"),
     # Package managers (prevent installs that could alter the system)
-    (r'\bapt(-get)?\s+(install|remove|purge|dist-upgrade)', "apt package modification"),
-    (r'\byum\s+(install|remove|erase|update)', "yum package modification"),
-    (r'\bdnf\s+(install|remove|erase|upgrade)', "dnf package modification"),
-    (r'\bpacman\s+-[SRU]', "pacman package modification"),
-    (r'\bbrew\s+(install|uninstall|remove)', "brew package modification"),
+    (re.compile(r'\bapt(-get)?\s+(install|remove|purge|dist-upgrade)', re.IGNORECASE), "apt package modification"),
+    (re.compile(r'\byum\s+(install|remove|erase|update)', re.IGNORECASE), "yum package modification"),
+    (re.compile(r'\bdnf\s+(install|remove|erase|upgrade)', re.IGNORECASE), "dnf package modification"),
+    (re.compile(r'\bpacman\s+-[SRU]', re.IGNORECASE), "pacman package modification"),
+    (re.compile(r'\bbrew\s+(install|uninstall|remove)', re.IGNORECASE), "brew package modification"),
     # Windows-specific dangerous commands
-    (r'\bformat\b\s+[A-Za-z]:', "format drive"),
-    (r'\bdiskpart\b', "diskpart command"),
-    (r'\breg\s+(add|delete|import)\b', "registry modification"),
-    (r'\bnet\s+(user|localgroup|stop|start)\b', "net service/user command"),
-    (r'\bsc\s+(delete|stop|config)\b', "sc service command"),
-    (r'\bbcdedit\b', "bcdedit command"),
-    (r'\bschtasks\s+/(create|delete)\b', "scheduled task modification"),
+    (re.compile(r'\bformat\b\s+[A-Za-z]:', re.IGNORECASE), "format drive"),
+    (re.compile(r'\bdiskpart\b', re.IGNORECASE), "diskpart command"),
+    (re.compile(r'\breg\s+(add|delete|import)\b', re.IGNORECASE), "registry modification"),
+    (re.compile(r'\bnet\s+(user|localgroup|stop|start)\b', re.IGNORECASE), "net service/user command"),
+    (re.compile(r'\bsc\s+(delete|stop|config)\b', re.IGNORECASE), "sc service command"),
+    (re.compile(r'\bbcdedit\b', re.IGNORECASE), "bcdedit command"),
+    (re.compile(r'\bschtasks\s+/(create|delete)\b', re.IGNORECASE), "scheduled task modification"),
 ]
+
+
+def _exec_shell(command: str, cwd: str, timeout: int) -> subprocess.CompletedProcess:
+    """Run a command in a sandboxed shell, routing through Git Bash on Windows."""
+    if IS_WINDOWS and _BASH_EXE:
+        return subprocess.run(
+            [_BASH_EXE, "-c", command],
+            capture_output=True, text=True,
+            cwd=cwd, timeout=timeout, env=_get_sandbox_env()
+        )
+    return subprocess.run(
+        command, shell=True,
+        capture_output=True, text=True,
+        cwd=cwd, timeout=timeout, env=_get_sandbox_env()
+    )
 
 
 def _validate_bash_command(command: str) -> str | None:
@@ -329,7 +335,7 @@ def _validate_bash_command(command: str) -> str | None:
     Returns error message or None if command is allowed."""
     # Check blocked command patterns
     for pattern, description in _BLOCKED_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
+        if pattern.search(command):
             return f"Command blocked: {description} is not allowed."
 
     # Check for absolute path references outside allowed directories
@@ -439,26 +445,7 @@ def bash(
         timeout = min(timeout, 300)
 
         # Execute command with sandboxed environment
-        # On Windows, route through bash (Git Bash) so Unix commands work
-        if IS_WINDOWS and _BASH_EXE:
-            result = subprocess.run(
-                [_BASH_EXE, "-c", command],
-                capture_output=True,
-                text=True,
-                cwd=work_dir,
-                timeout=timeout,
-                env=_get_sandbox_env()
-            )
-        else:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                cwd=work_dir,
-                timeout=timeout,
-                env=_get_sandbox_env()
-            )
+        result = _exec_shell(command, work_dir, timeout)
 
         stdout = _truncate_output(result.stdout.strip())
         stderr = result.stderr.strip()
@@ -866,25 +853,7 @@ def _run_command(command: str, cwd: str = ".", timeout: int = 60) -> Dict[str, A
         if not os.path.isdir(work_dir):
             return {"error": f"Directory does not exist: {work_dir}", "status": "error"}
 
-        if IS_WINDOWS and _BASH_EXE:
-            result = subprocess.run(
-                [_BASH_EXE, "-c", command],
-                capture_output=True,
-                text=True,
-                cwd=work_dir,
-                timeout=timeout,
-                env=_get_sandbox_env()
-            )
-        else:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                cwd=work_dir,
-                timeout=timeout,
-                env=_get_sandbox_env()
-            )
+        result = _exec_shell(command, work_dir, timeout)
 
         return {
             "stdout": result.stdout.strip(),
