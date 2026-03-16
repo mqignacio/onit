@@ -606,6 +606,10 @@ class ChatUI:
     def stop_tool_spinner(self) -> None:
         pass
 
+    def tool_progress(self, name: str, elapsed_seconds: int) -> None:
+        """No-op for text UI; spinner already indicates progress."""
+        pass
+
     def show_tool_done(self, name: str, result: str, success: bool = True) -> None:
         """Print a bordered tool-result block inline (mirrors chat history style)."""
         ts = self.format_timestamp()

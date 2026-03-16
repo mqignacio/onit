@@ -167,6 +167,17 @@ class StreamingAdapter:
             truncated = result[:500] + "..." if len(result) > 500 else result
             print(f"{name} returned: {truncated}")
 
+    def tool_progress(self, name, elapsed_seconds):
+        """Called periodically during long-running tool calls to keep SSE alive."""
+        if self._on_tool_status:
+            self._on_tool_status(f"{name} running… ({elapsed_seconds}s)")
+        if self.on_token:
+            # Send an empty-content SSE event as a keepalive heartbeat
+            result = self.on_token("", self._content)
+            if asyncio.iscoroutine(result):
+                task = asyncio.ensure_future(result)
+                self._pending.append(task)
+
     def add_tool_result(self, name, result, truncate=300):
         pass
 

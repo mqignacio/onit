@@ -318,10 +318,26 @@ async def _execute_tool(function_name: str, function_arguments: dict,
             try:
                 tool_handler = tool_registry[tool_name]
                 try:
-                    tool_response = await asyncio.wait_for(
-                        tool_handler(**function_arguments),
-                        timeout=timeout,
-                    )
+                    tool_task = asyncio.ensure_future(tool_handler(**function_arguments))
+
+                    async def _heartbeat(interval=10):
+                        """Send periodic progress events to keep SSE alive."""
+                        elapsed = 0
+                        while True:
+                            await asyncio.sleep(interval)
+                            elapsed += interval
+                            if chat_ui:
+                                chat_ui.tool_progress(function_name, elapsed)
+
+                    heartbeat_task = asyncio.ensure_future(_heartbeat())
+                    try:
+                        tool_response = await asyncio.wait_for(tool_task, timeout=timeout)
+                    finally:
+                        heartbeat_task.cancel()
+                        try:
+                            await heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
                 except asyncio.TimeoutError:
                     tool_response = (f"- tool call timed out after {timeout} seconds. "
                                      "Tool might have succeeded but no response was received. "

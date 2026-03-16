@@ -495,6 +495,10 @@ class WebChatUI:
             "timestamp": datetime.now().strftime("%I:%M %p %d %b"),
         })
 
+    def tool_progress(self, name: str, elapsed_seconds: int) -> None:
+        """No-op for web UI; Gradio polling handles progress display."""
+        pass
+
     def render(self, thinking: bool = False):
         """No-op for web UI; Gradio handles rendering via polling."""
         pass
