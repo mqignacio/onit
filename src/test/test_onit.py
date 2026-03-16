@@ -352,6 +352,7 @@ class TestOnItA2AExecutor:
         """Different context_ids get different sessions."""
         mock_onit = MagicMock()
         mock_onit.session_path = str(tmp_path / "sessions" / "test.jsonl")
+        mock_onit.config_data.get.return_value = None
         os.makedirs(os.path.dirname(mock_onit.session_path), exist_ok=True)
 
         executor = OnItA2AExecutor(mock_onit)
