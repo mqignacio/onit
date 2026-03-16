@@ -9,8 +9,10 @@ rowel.atienza@up.edu.ph
 '''
 
 import os
+import sys
 import yaml
 import time
+import multiprocessing
 from multiprocessing import Pool
 import logging
 import argparse
@@ -181,7 +183,10 @@ def run_servers(config_path=None, log_level='INFO'):
             logger.warning("No enabled servers found in configuration")
             return
 
-        with Pool(processes=len(server_args)) as pool:
+        # Use 'spawn' on Linux to avoid fork-from-thread deadlocks
+        # when run_servers() is called from a daemon thread.
+        ctx = multiprocessing.get_context('spawn') if sys.platform != 'darwin' else multiprocessing
+        with ctx.Pool(processes=len(server_args)) as pool:
             results = [pool.apply_async(run_server, args) for args in server_args]
 
             logger.info(f"Starting {len(server_args)} servers...")

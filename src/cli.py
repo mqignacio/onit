@@ -407,8 +407,8 @@ def _start_mcp_servers_background(log_level='ERROR'):
     from .mcp.servers.run import run_servers
     try:
         run_servers(log_level=log_level)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"ERROR: MCP server background thread failed: {exc}", file=sys.stderr)
 
 
 def _ensure_mcp_servers(config_data: dict, log_level='ERROR'):
@@ -446,8 +446,8 @@ def _ensure_mcp_servers(config_data: dict, log_level='ERROR'):
     )
     mcp_thread.start()
 
-    # Wait for all servers to be reachable
-    if not _mcp_servers_ready(config_data, timeout=15.0):
+    # Wait for all servers to be reachable (spawn start method on Linux is slower)
+    if not _mcp_servers_ready(config_data, timeout=30.0):
         print("Warning: some MCP servers may not have started in time.",
               file=sys.stderr)
 
