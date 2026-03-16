@@ -27,7 +27,7 @@ import random
 from fastmcp import Client
 from abc import ABC, abstractmethod
 from mcp.types import ImageContent, TextContent, AudioContent
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 import logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -96,7 +96,7 @@ class ToolHandler(RequestHandler):
                  **kwargs: object):
         super().__init__(url=url, tool_item=tool_item, **kwargs)
 
-    async def __call__(self, **kwargs: object) -> str | None:
+    async def __call__(self, log_handler: Callable | None = None, **kwargs: object) -> str | None:
         # if there is an image in the kwargs, convert it to base64
         media_types = ['images', 'audios']
         for media_type in media_types:
@@ -136,7 +136,7 @@ class ToolHandler(RequestHandler):
                     return f"Unsupported {media_type} type provided. Please provide a list of base64-encoded {media_types} or file paths."
 
 
-        async with Client(self.url) as client:
+        async with Client(self.url, log_handler=log_handler) as client:
             keys_kwargs = list(kwargs.keys())
             logger.info(f"Calling tool: {self.tool_item['function']['name']} with arguments: {keys_kwargs}")
             tool_response = await client.call_tool(self.tool_item['function']['name'], kwargs)

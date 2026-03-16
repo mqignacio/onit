@@ -68,3 +68,9 @@ mcp:
       description: Web search, bash commands, file operations, and document tools
       url: http://127.0.0.1:18201/sse
       enabled: true
+
+    # External MCP servers using Streamable HTTP transport (URLs should NOT end in /sse)
+    # - name: SandboxMCPServer
+    #   description: Sandbox code execution server
+    #   url: http://127.0.0.1:18202/mcp
+    #   enabled: true

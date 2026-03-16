@@ -557,6 +557,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--mcp-sse', type=str, action='append', default=None,
                         help='URL of an external MCP tools server using SSE transport (can be repeated). '
                              'Example: --mcp-sse http://localhost:8080/sse')
+    parser.add_argument('--mcp-server', type=str, action='append', default=None,
+                        help='URL of an external MCP tools server using Streamable HTTP transport (can be repeated). '
+                             'Example: --mcp-server http://localhost:8080/mcp')
 
     return parser
 
@@ -629,16 +632,17 @@ def _parse_and_resolve_config(args: argparse.Namespace) -> dict:
     if args.mcp_host:
         config_data.setdefault('mcp', {})['mcp_host'] = args.mcp_host
 
-    # --mcp-sse adds external MCP servers to the servers list
-    if args.mcp_sse:
-        servers = config_data.setdefault('mcp', {}).setdefault('servers', [])
-        for i, url in enumerate(args.mcp_sse):
-            servers.append({
-                'name': f'ExternalSSE_{i}',
-                'description': f'External MCP server at {url}',
-                'url': url,
-                'enabled': True,
-            })
+    # --mcp-sse / --mcp-server add external MCP servers to the servers list
+    for urls, prefix in [(args.mcp_sse, 'ExternalSSE'), (args.mcp_server, 'ExternalMCP')]:
+        if urls:
+            servers = config_data.setdefault('mcp', {}).setdefault('servers', [])
+            for i, url in enumerate(urls):
+                servers.append({
+                    'name': f'{prefix}_{i}',
+                    'description': f'External MCP server at {url}',
+                    'url': url,
+                    'enabled': True,
+                })
 
     # Check that essential environment variables are set
     serving = config_data.get('serving', {})

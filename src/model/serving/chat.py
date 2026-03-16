@@ -318,7 +318,13 @@ async def _execute_tool(function_name: str, function_arguments: dict,
             try:
                 tool_handler = tool_registry[tool_name]
                 try:
-                    tool_task = asyncio.ensure_future(tool_handler(**function_arguments))
+                    # Build a log handler to forward MCP notifications/message
+                    # to the UI in real-time (e.g. sandbox stdout/stderr).
+                    _log_handler = None
+                    if chat_ui and hasattr(chat_ui, 'tool_log'):
+                        async def _log_handler(msg):
+                            chat_ui.tool_log(function_name, msg.data, level=msg.level)
+                    tool_task = asyncio.ensure_future(tool_handler(log_handler=_log_handler, **function_arguments))
 
                     async def _heartbeat(interval=10):
                         """Send periodic progress events to keep SSE alive."""

@@ -33,6 +33,7 @@ Requires:
 10. get_document_context - Extract relevant context from a document
 '''
 
+import asyncio
 import base64
 import json
 import os
@@ -46,7 +47,7 @@ import requests
 from pathlib import Path
 from typing import Annotated, Optional, Dict, Any
 from pydantic import Field
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 
 from src.mcp.servers.tasks.shared import (
     truncate_output as _truncate_output,
@@ -319,6 +320,77 @@ def _exec_shell(command: str, cwd: str, timeout: int) -> subprocess.CompletedPro
     )
 
 
+async def _exec_shell_streaming(command: str, cwd: str, timeout: int,
+                                ctx: Context | None = None) -> dict:
+    """Run a command asynchronously, streaming stdout/stderr lines via ctx.log().
+
+    Returns a dict with stdout, stderr, and returncode.
+    Falls back to synchronous _exec_shell if ctx is None.
+    """
+    if ctx is None:
+        result = _exec_shell(command, cwd, timeout)
+        return {
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "returncode": result.returncode,
+        }
+
+    env = _get_sandbox_env()
+    if IS_WINDOWS and _BASH_EXE:
+        proc = await asyncio.create_subprocess_exec(
+            _BASH_EXE, "-c", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd, env=env,
+        )
+    else:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd, env=env,
+        )
+
+    stdout_lines = []
+    stderr_lines = []
+    _MAX_LINES = 10_000  # Cap collected lines to prevent OOM on verbose commands
+
+    async def _read_stream(stream, collector, level):
+        async for raw_line in stream:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            if len(collector) < _MAX_LINES:
+                collector.append(line)
+            await ctx.log(level=level, message=line)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _read_stream(proc.stdout, stdout_lines, "info"),
+                _read_stream(proc.stderr, stderr_lines, "warning"),
+            ),
+            timeout=timeout,
+        )
+        await proc.wait()
+    except asyncio.TimeoutError:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass  # Process didn't respond to SIGKILL; nothing more we can do
+        return {
+            "stdout": "\n".join(stdout_lines),
+            "stderr": "\n".join(stderr_lines),
+            "returncode": -1,
+            "timeout": True,
+        }
+
+    return {
+        "stdout": "\n".join(stdout_lines),
+        "stderr": "\n".join(stderr_lines),
+        "returncode": proc.returncode,
+    }
+
+
 def _validate_bash_command(command: str) -> str | None:
     """Check command for blocked patterns and path references outside allowed dirs.
     Returns error message or None if command is allowed."""
@@ -394,10 +466,11 @@ Args:
 
 Returns JSON: {stdout, stderr, returncode, cwd, command, status}"""
 )
-def bash(
+async def bash(
     command: Optional[str] = None,
     cwd: str = ".",
-    timeout: int = DEFAULT_TIMEOUT
+    timeout: int = DEFAULT_TIMEOUT,
+    ctx: Context = None,
 ) -> str:
     if err := _validate_required(command=command):
         return err
@@ -433,12 +506,22 @@ def bash(
         # Cap timeout at 5 minutes
         timeout = min(timeout, 300)
 
-        # Execute command with sandboxed environment
-        result = _exec_shell(command, work_dir, timeout)
+        # Execute command with streaming output via ctx.log()
+        result = await _exec_shell_streaming(command, work_dir, timeout, ctx=ctx)
 
-        stdout = _truncate_output(result.stdout.strip())
-        stderr = result.stderr.strip()
-        returncode = result.returncode
+        stdout = _truncate_output(result["stdout"])
+        stderr = result["stderr"]
+        returncode = result["returncode"]
+
+        if result.get("timeout"):
+            return json.dumps({
+                "error": f"Command timed out after {timeout} seconds",
+                "stdout": stdout if stdout else None,
+                "stderr": stderr if stderr else None,
+                "command": command,
+                "cwd": work_dir,
+                "status": "timeout"
+            })
 
         # Provide helpful message for empty output
         if not stdout and not stderr and returncode == 0:
@@ -453,13 +536,6 @@ def bash(
             "status": "success" if returncode == 0 else "failed"
         }, indent=2)
 
-    except subprocess.TimeoutExpired:
-        return json.dumps({
-            "error": f"Command timed out after {timeout} seconds",
-            "command": command,
-            "cwd": cwd,
-            "status": "timeout"
-        })
     except Exception as e:
         return json.dumps({
             "error": str(e),

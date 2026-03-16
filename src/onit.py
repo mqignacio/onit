@@ -167,6 +167,19 @@ class StreamingAdapter:
             truncated = result[:500] + "..." if len(result) > 500 else result
             print(f"{name} returned: {truncated}")
 
+    def tool_log(self, name: str, data: str, level: str = "info") -> None:
+        """Called when a tool emits a log/notification message (e.g. sandbox output)."""
+        if self._on_tool_status:
+            self._on_tool_status(f"[{name}] {data}")
+        if self.on_token:
+            # Forward sandbox output as a streaming token so the UI shows it in real-time
+            log_line = f"\n[{name}] {data}\n"
+            self._content += log_line
+            result = self.on_token(log_line, self._content)
+            if asyncio.iscoroutine(result):
+                task = asyncio.ensure_future(result)
+                self._pending.append(task)
+
     def tool_progress(self, name, elapsed_seconds):
         """Called periodically during long-running tool calls to keep SSE alive."""
         if self._on_tool_status:

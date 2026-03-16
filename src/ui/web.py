@@ -495,6 +495,10 @@ class WebChatUI:
             "timestamp": datetime.now().strftime("%I:%M %p %d %b"),
         })
 
+    def tool_log(self, name: str, data: str, level: str = "info") -> None:
+        """Forward real-time log messages from MCP tools (e.g. sandbox output)."""
+        self.add_log(f"[{name}] {data}", level=level)
+
     def tool_progress(self, name: str, elapsed_seconds: int) -> None:
         """No-op for web UI; Gradio polling handles progress display."""
         pass

@@ -40,7 +40,7 @@ import os
 import tempfile
 from typing import Annotated, Optional
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from pydantic import Field
 
 import logging
@@ -218,10 +218,10 @@ Args:
 
 Returns JSON: {stdout, stderr, returncode, cwd, command, status}"""
 )
-def bash(command: Optional[str] = None, cwd: str = ".", timeout: int = 300) -> str:
+async def bash(command: Optional[str] = None, cwd: str = ".", timeout: int = 300, ctx: Context = None) -> str:
     if err := _validate_required(command=command):
         return err
-    return _bash(command=command, cwd=cwd, timeout=timeout)
+    return await _bash(command=command, cwd=cwd, timeout=timeout, ctx=ctx)
 
 
 @mcp.tool(

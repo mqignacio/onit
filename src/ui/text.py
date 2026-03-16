@@ -606,6 +606,11 @@ class ChatUI:
     def stop_tool_spinner(self) -> None:
         pass
 
+    def tool_log(self, name: str, data: str, level: str = "info") -> None:
+        """Display real-time log messages from MCP tools (e.g. sandbox output)."""
+        style = "dim yellow" if level == "warning" else "dim red" if level == "error" else "dim cyan"
+        self.console.print(f"  [{name}] {data}", style=style)
+
     def tool_progress(self, name: str, elapsed_seconds: int) -> None:
         """No-op for text UI; spinner already indicates progress."""
         pass
