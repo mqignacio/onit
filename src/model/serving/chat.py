@@ -735,6 +735,7 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
 
     MAX_CHAT_ITERATIONS = 100
     MAX_REPEATED_TOOL_CALLS = 30
+    MAX_API_RETRIES = 3
     iteration_count = 0
     tool_call_history: list = []  # list of (name, args_json) tuples
 
@@ -754,69 +755,85 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
         _full_content = ""
         _full_reasoning = ""
 
-        try:
-            if not safety_queue.empty():
-                logger.warning("Safety queue triggered before API call, exiting chat loop.")
-                return None
-
-            completion_kwargs = dict(
-                model=model,
-                messages=messages,
-                stream=stream,
-                tool_choice="auto",          # never "required"
-                temperature=0.6,             # official recommendation
-                top_p=0.95,
-                max_tokens=max_tokens,             # cap to prevent runaway generation
-                extra_body={
-                    "top_k": 20,             # vLLM extension, important for Qwen3
-                    "repetition_penalty": 1.05,  # helps break repetition loops
-                    "chat_template_kwargs": {"enable_thinking": think},  # if not using CoT
-                },
-            )
-            if tools: # and not images_bytes:  # vLLM doesn't support tools + images in the same message, so only include tools if no images are present
-                completion_kwargs["tools"] = tools
-
-            chat_completion = await client.chat.completions.create(**completion_kwargs)
-
-            # Streaming path: iterate chunks, populate shared variables
-            if stream:
-                stream_result = await _process_streaming_response(
-                    chat_completion, safety_queue, chat_ui, think,
-                )
-                if stream_result is None:
+        # Retry loop for transient API errors — preserves accumulated messages/tool history
+        api_error = None
+        for api_attempt in range(1, MAX_API_RETRIES + 1):
+            api_error = None
+            try:
+                if not safety_queue.empty():
+                    logger.warning("Safety queue triggered before API call, exiting chat loop.")
                     return None
-                _full_content, _full_reasoning, _full_tool_calls, _ = stream_result
-                _content, _tool_calls, _message_for_history = _unify_streaming_result(
-                    _full_content, _full_tool_calls,
-                )
 
-            await asyncio.sleep(0.1)
-            if not safety_queue.empty():
-                logger.warning("Safety queue triggered after API call, exiting chat loop.")
-                return None
-        except APITimeoutError as e:
-            error_message = f"Request to {host} timed out after {timeout} seconds."
-            logger.error(error_message)
-            if chat_ui:
-                chat_ui.add_log(error_message, level="error")
-            elif verbose:
-                print(error_message)
-            return None
-        except OpenAIError as e:
-            error_message = f"Error communicating with {host}: {e}."
-            logger.error(error_message)
-            if chat_ui:
-                chat_ui.add_log(error_message, level="warning")
-            elif verbose:
-                print(error_message)
-            return None
-        except Exception as e:
-            error_message = f"Unexpected error: {e}"
-            logger.error(error_message)
-            if chat_ui:
-                chat_ui.add_log(error_message, level="error")
-            elif verbose:
-                print(error_message)
+                completion_kwargs = dict(
+                    model=model,
+                    messages=messages,
+                    stream=stream,
+                    tool_choice="auto",          # never "required"
+                    temperature=0.6,             # official recommendation
+                    top_p=0.95,
+                    max_tokens=max_tokens,             # cap to prevent runaway generation
+                    extra_body={
+                        "top_k": 20,             # vLLM extension, important for Qwen3
+                        "repetition_penalty": 1.05,  # helps break repetition loops
+                        "chat_template_kwargs": {"enable_thinking": think},  # if not using CoT
+                    },
+                )
+                if tools: # and not images_bytes:  # vLLM doesn't support tools + images in the same message, so only include tools if no images are present
+                    completion_kwargs["tools"] = tools
+
+                chat_completion = await client.chat.completions.create(**completion_kwargs)
+
+                # Streaming path: iterate chunks, populate shared variables
+                if stream:
+                    stream_result = await _process_streaming_response(
+                        chat_completion, safety_queue, chat_ui, think,
+                    )
+                    if stream_result is None:
+                        return None
+                    _full_content, _full_reasoning, _full_tool_calls, _ = stream_result
+                    _content, _tool_calls, _message_for_history = _unify_streaming_result(
+                        _full_content, _full_tool_calls,
+                    )
+
+                await asyncio.sleep(0.1)
+                if not safety_queue.empty():
+                    logger.warning("Safety queue triggered after API call, exiting chat loop.")
+                    return None
+                break  # success — exit retry loop
+            except APITimeoutError as e:
+                api_error = f"Request to {host} timed out after {timeout} seconds."
+                logger.error(api_error)
+                if chat_ui:
+                    chat_ui.add_log(api_error, level="error")
+                elif verbose:
+                    print(api_error)
+            except OpenAIError as e:
+                api_error = f"Error communicating with {host}: {e}."
+                logger.error(api_error)
+                if chat_ui:
+                    chat_ui.add_log(api_error, level="warning")
+                elif verbose:
+                    print(api_error)
+            except Exception as e:
+                api_error = f"Unexpected error: {e}"
+                logger.error(api_error)
+                if chat_ui:
+                    chat_ui.add_log(api_error, level="error")
+                elif verbose:
+                    print(api_error)
+
+            # Log retry attempt if we haven't exhausted retries
+            if api_attempt < MAX_API_RETRIES:
+                retry_msg = f"Retrying API call (attempt {api_attempt + 1}/{MAX_API_RETRIES})..."
+                logger.info(retry_msg)
+                if chat_ui:
+                    chat_ui.add_log(retry_msg, level="info")
+                elif verbose:
+                    print(retry_msg)
+                await asyncio.sleep(min(2 ** api_attempt, 10))  # exponential backoff
+
+        if api_error is not None:
+            # All retries exhausted
             return None
 
         # Non-streaming: extract from response object into unified variables
