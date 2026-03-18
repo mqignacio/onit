@@ -85,13 +85,54 @@ async def _resolve_model_id(client: AsyncOpenAI, host: str) -> str:
     return model_id
 
 
-def _parse_tool_call_from_content(content: str, tool_registry) -> Optional[dict]:
+def _parse_commands_format(obj: dict, tool_registry) -> Optional[list[dict]]:
+    """Parse the commands-style response format used by some models.
+
+    Expects a dict like:
+        {"state_analysis": "...", "explanation": "...",
+         "commands": [{"keystrokes": "tool_name arg1 arg2\n", ...}],
+         "is_task_complete": false}
+
+    Returns a list of {"name": ..., "arguments": ...} dicts, or None if
+    the format doesn't match.
+    """
+    if not isinstance(obj, dict) or "commands" not in obj:
+        return None
+    commands = obj.get("commands", [])
+    if not isinstance(commands, list) or not commands:
+        return None
+    results = []
+    for cmd in commands:
+        keystrokes = cmd.get("keystrokes", "").strip()
+        if not keystrokes:
+            continue
+        # keystrokes is "tool_name [args...]\n" — split into name and the rest
+        parts = keystrokes.split(None, 1)
+        tool_name = parts[0]
+        if tool_name not in tool_registry.tools:
+            continue
+        # If there's text after the tool name, treat it as a single positional
+        # argument (the tool schema decides how to interpret it).
+        arguments = {}
+        if len(parts) > 1:
+            arguments = {"input": parts[1]}
+        results.append({
+            "name": tool_name,
+            "arguments": arguments,
+            "_timeout_sec": cmd.get("timeout_sec"),
+            "_is_blocking": cmd.get("is_blocking", True),
+        })
+    return results if results else None
+
+
+def _parse_tool_call_from_content(content: str, tool_registry) -> Optional[dict | list[dict]]:
     """Detect a raw JSON tool call in message content.
 
     Some models return tool calls as plain JSON in the response body instead of
     using the structured tool_calls field.  This function tries to parse the
     content and, if it looks like a valid tool call for a known tool, returns
-    a dict with 'name' and 'arguments'.
+    a dict with 'name' and 'arguments' (or a list of such dicts for the
+    commands format).
     """
     if not content or not tool_registry:
         return None
@@ -139,6 +180,10 @@ def _parse_tool_call_from_content(content: str, tool_registry) -> Optional[dict]
         if obj["name"] not in tool_registry.tools:
             return None
         return obj
+    # Try commands-style format: {"commands": [{"keystrokes": "tool\n", ...}]}
+    commands_result = _parse_commands_format(obj, tool_registry)
+    if commands_result:
+        return commands_result
     return None
 
 
@@ -208,8 +253,10 @@ def _looks_like_raw_tool_call(content: str) -> bool:
     if not content:
         return False
     text = content.split("</think>")[-1].strip() if "</think>" in content else content.strip()
-    # Quick heuristic: must contain both "name" and "arguments" keys in JSON-like syntax
-    return bool(re.search(r'"name"\s*:\s*"[^"]+"', text) and re.search(r'"arguments"\s*:', text))
+    # Quick heuristic: standard format or commands format
+    has_standard = bool(re.search(r'"name"\s*:\s*"[^"]+"', text) and re.search(r'"arguments"\s*:', text))
+    has_commands = bool(re.search(r'"commands"\s*:\s*\[', text) and re.search(r'"keystrokes"\s*:', text))
+    return has_standard or has_commands
 
 
 def _resolve_sandbox_download_locally(args: dict, data_path: str) -> str | None:
@@ -699,18 +746,21 @@ async def _handle_raw_tool_call(
     """
     raw_tool = _parse_tool_call_from_content(last_response, tool_registry)
     if raw_tool:
-        function_name = raw_tool["name"]
-        function_arguments = raw_tool["arguments"]
-        synthetic_id = f"call_{uuid.uuid4().hex[:24]}"
+        # Normalize to a list (commands format returns a list, legacy returns a dict)
+        tool_calls = raw_tool if isinstance(raw_tool, list) else [raw_tool]
         messages.append({"role": "assistant", "content": last_response})
-        bail = await _execute_tool(
-            function_name, function_arguments, synthetic_id,
-            tool_registry, timeout, data_path, chat_ui, verbose,
-            messages, tool_call_history, max_repeated,
-            is_structured=False, session_id=session_id,
-        )
-        if bail:
-            return False, bail
+        for tc in tool_calls:
+            function_name = tc["name"]
+            function_arguments = {k: v for k, v in tc.get("arguments", {}).items()}
+            synthetic_id = f"call_{uuid.uuid4().hex[:24]}"
+            bail = await _execute_tool(
+                function_name, function_arguments, synthetic_id,
+                tool_registry, timeout, data_path, chat_ui, verbose,
+                messages, tool_call_history, max_repeated,
+                is_structured=False, session_id=session_id,
+            )
+            if bail:
+                return False, bail
         return True, None  # loop back for the model to generate the final response
 
     # Guard against returning raw tool-call JSON to the user.
@@ -783,6 +833,7 @@ async def _handle_structured_tool_calls(
 
 async def chat(host: str = "http://127.0.0.1:8001/v1",
          host_key: str = "EMPTY",
+         model: str = None,
          instruction: str = "Tell me more about yourself.",
          images: List[str]|str = None,
          tool_registry: Optional[Any] = None,
@@ -808,24 +859,24 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
     api_key = _resolve_api_key(host, host_key)
     client = AsyncOpenAI(base_url=host, api_key=api_key)
 
-    # Resolve model with retries — the server may not be ready yet.
-    _MODEL_RETRIES = 3
-    model = None
-    for _attempt in range(1, _MODEL_RETRIES + 1):
-        try:
-            model = await _resolve_model_id(client, host)
-            break
-        except Exception as e:
-            _err = f"Failed to resolve model from {host} (attempt {_attempt}/{_MODEL_RETRIES}): {e}"
-            logger.error(_err)
-            if chat_ui:
-                chat_ui.add_log(_err, level="error")
-            elif verbose:
-                print(_err)
-            if _attempt < _MODEL_RETRIES:
-                await asyncio.sleep(min(2 ** _attempt, 10))
-    if model is None:
-        return None
+    # Resolve model: use explicit name if provided, otherwise auto-detect.
+    if not model:
+        _MODEL_RETRIES = 3
+        for _attempt in range(1, _MODEL_RETRIES + 1):
+            try:
+                model = await _resolve_model_id(client, host)
+                break
+            except Exception as e:
+                _err = f"Failed to resolve model from {host} (attempt {_attempt}/{_MODEL_RETRIES}): {e}"
+                logger.error(_err)
+                if chat_ui:
+                    chat_ui.add_log(_err, level="error")
+                elif verbose:
+                    print(_err)
+                if _attempt < _MODEL_RETRIES:
+                    await asyncio.sleep(min(2 ** _attempt, 10))
+        if model is None:
+            return None
 
     if chat_ui:
         chat_ui.model_name = model

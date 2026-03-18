@@ -802,7 +802,7 @@ class OnIt(BaseModel):
         last_response = await chat(
             host=self.model_serving["host"],
             host_key=self.model_serving.get("host_key", "EMPTY"),
-
+            model=self.model_serving.get("model"),
             instruction=instruction,
             images=images,
             tool_registry=self.tool_registry,
@@ -881,7 +881,7 @@ class OnIt(BaseModel):
                           'session_history': self.load_session_history()}
                 last_response = await chat(host=self.model_serving["host"],
                                             host_key=self.model_serving.get("host_key", "EMPTY"),
-
+                                            model=self.model_serving.get("model"),
                                             instruction=instruction,
                                             tool_registry=self.tool_registry,
                                             safety_queue=self.safety_queue,
@@ -1282,7 +1282,7 @@ class OnIt(BaseModel):
                     kwargs['prompt_intro'] = self.prompt_intro
                 last_response = await chat(host=self.model_serving["host"],
                                             host_key=self.model_serving.get("host_key", "EMPTY"),
-                                
+                                            model=self.model_serving.get("model"),
                                             instruction=instruction,
                                             tool_registry=self.tool_registry,
                                             safety_queue=self.safety_queue,
