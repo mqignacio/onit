@@ -126,7 +126,7 @@ Search the web for additional information **if and only if** above documents are
 2. **Use sandbox folder `/data` for data related tasks**
 3. **Write and run code** in the sandbox (e.g., `/workspace/train.py`). Install packages as needed.
 4. **Iterate on errors** — read logs, diagnose, and fix. Exhaust all reasonable fixes before stopping. Only report an error if it is truly unresolvable.
-5. **Save final outputs** to `{data_path}` using agent tools.
+5. **Save final outputs and complete codebase** to `{data_path}` using agent tools.
 """
 
    instruction += f"""

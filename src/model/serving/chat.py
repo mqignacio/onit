@@ -833,7 +833,7 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
     elif verbose:
         print(f"Starting chat with model: {model}")
 
-    MAX_CHAT_ITERATIONS = 100
+    MAX_CHAT_ITERATIONS = -1
     MAX_REPEATED_TOOL_CALLS = 30
     MAX_API_RETRIES = 3
     iteration_count = 0
@@ -841,7 +841,7 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
 
     while True:
         iteration_count += 1
-        if iteration_count > MAX_CHAT_ITERATIONS:
+        if MAX_CHAT_ITERATIONS >= 0 and iteration_count > MAX_CHAT_ITERATIONS:
             msg = f"I am sorry 😊. Could you try to rephrase or provide additional details?"
             if chat_ui:
                 chat_ui.add_log(f"Chat loop exceeded {MAX_CHAT_ITERATIONS} iterations, stopping.", level="warning")
@@ -915,8 +915,8 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                 elif verbose:
                     print(api_error)
             except Exception as e:
-                api_error = f"Unexpected error: {e}"
-                logger.error(api_error)
+                api_error = f"Unexpected error ({type(e).__name__}): {e}"
+                logger.error(api_error, exc_info=True)
                 if chat_ui:
                     chat_ui.add_log(api_error, level="error")
                 elif verbose:
