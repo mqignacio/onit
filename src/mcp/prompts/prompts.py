@@ -114,16 +114,19 @@ Search the web for additional information **if and only if** above documents are
    if sandbox_available:
       instruction += f"""
 ## Code Development and Execution
-You have access to a sandboxed Docker container. **Do ALL development inside the sandbox.**
+**Do ALL** development inside the sandboxed Docker container.
+**DO NOT** run code in the agent environment and file system.
 
-1. **Check sandbox status first** to see installed packages, GPU availability, and mounted data directories. Use mounted data directly; do not re-download it.
-2. **Write code** into the sandbox. Relative paths resolve from /workspace.
-3. **Install packages** as needed (network is handled automatically during install).
-4. **Run and iterate** until the task is fully met.
-5. **Read outputs** to inspect results, logs, or generated files.
-6. **When done**, download final outputs to `{data_path}`.
+### Filesystem Rules
+- **Sandbox tools** (sandbox_write_file, sandbox_read_file, etc.) → use `/workspace/...` paths only.
+- **Agent tools** (write_file, read_file) → use `{data_path}/...` paths only.
 
-Do NOT write files directly to `{data_path}` during development — it is only the final destination for verified, working results.
+### Workflow
+1. **Check sandbox status** — note installed packages, GPU, and mounted data directories. 
+2. **Use sandbox folder `/data` for data related tasks**
+3. **Write and run code** in the sandbox (e.g., `/workspace/train.py`). Install packages as needed.
+4. **Iterate on errors** — read logs, diagnose, and fix. Exhaust all reasonable fixes before stopping. Only report an error if it is truly unresolvable.
+5. **Save final outputs** to `{data_path}` using agent tools.
 """
 
    instruction += f"""

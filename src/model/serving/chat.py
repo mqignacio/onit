@@ -212,6 +212,49 @@ def _looks_like_raw_tool_call(content: str) -> bool:
     return bool(re.search(r'"name"\s*:\s*"[^"]+"', text) and re.search(r'"arguments"\s*:', text))
 
 
+def _resolve_sandbox_download_locally(args: dict, data_path: str) -> str | None:
+    """Handle sandbox_download_file locally when the file already exists on the host.
+
+    The sandbox container may volume-mount data_path as /workspace.  If so,
+    files written there already exist on the host and we can skip the remote
+    server call entirely.  Returns a JSON result string on success, or None
+    to fall through to the remote server.
+    """
+    src_path = args.get("path", "")
+    if not src_path:
+        return None
+
+    abs_data = os.path.abspath(data_path)
+
+    # Resolve to a relative path under data_path
+    if src_path.startswith("/workspace/"):
+        relative = src_path[len("/workspace/"):]
+    elif src_path.startswith("/workspace"):
+        relative = src_path[len("/workspace"):]
+    elif os.path.abspath(src_path).startswith(abs_data):
+        relative = os.path.relpath(os.path.abspath(src_path), abs_data)
+    else:
+        return None
+
+    if not relative or relative == ".":
+        return None
+
+    local_path = os.path.join(data_path, relative)
+    if not os.path.exists(local_path):
+        return None  # not on host — must go through remote server
+
+    try:
+        size_bytes = os.path.getsize(local_path)
+    except OSError:
+        size_bytes = None
+    return json.dumps({
+        "status": "ok",
+        "filename": os.path.basename(relative),
+        "dest": local_path,
+        "size_bytes": size_bytes,
+    }, indent=2)
+
+
 def _extract_base64_file(tool_response: str, data_path: str) -> tuple[str, str | None, str | None]:
     """Detect base64-encoded file data in a tool response and save it to disk.
 
@@ -306,6 +349,29 @@ async def _execute_tool(function_name: str, function_arguments: dict,
     if session_id and hasattr(tool_registry, '_SANDBOX_SESSION_TOOLS') and \
             function_name in tool_registry._SANDBOX_SESSION_TOOLS:
         function_arguments.setdefault("session_id", session_id)
+    # Inject data_path into sandbox tools so the sandbox can mount/access
+    # the agent's data directory for direct file sharing.
+    if data_path and hasattr(tool_registry, '_SANDBOX_DATA_PATH_TOOLS') and \
+            function_name in tool_registry._SANDBOX_DATA_PATH_TOOLS:
+        function_arguments.setdefault("data_path", data_path)
+    # Intercept sandbox_download_file for /workspace/ paths.  The container
+    # volume-mounts data_path as /workspace, so those files already exist on
+    # the host — no need to call the remote server (which may be containerized
+    # and unable to write to host paths).
+    if function_name == "sandbox_download_file" and data_path:
+        result = _resolve_sandbox_download_locally(function_arguments, data_path)
+        if result is not None:
+            if chat_ui:
+                chat_ui.add_tool_call(function_name, function_arguments)
+                chat_ui.show_tool_start(function_name, function_arguments)
+            tool_message = {'role': 'tool', 'content': result, 'name': function_name,
+                            'parameters': function_arguments, "tool_call_id": tool_call_id}
+            messages.append(tool_message)
+            if chat_ui:
+                chat_ui.add_tool_result(function_name, result)
+                if is_structured:
+                    chat_ui.show_tool_done(function_name, result)
+            return None
     if chat_ui:
         chat_ui.add_tool_call(function_name, function_arguments)
         chat_ui.show_tool_start(function_name, function_arguments)

@@ -261,9 +261,19 @@ class ToolRegistry:
 
 
     # Sandbox tool names that indicate code execution sandbox is available
-    _SANDBOX_TOOL_NAMES = {"run_code", "install_packages"}
+    _SANDBOX_TOOL_NAMES = {"sandbox_run_code", "sandbox_install_packages"}
     # All sandbox-related tools that need a session_id injected
-    _SANDBOX_SESSION_TOOLS = {"run_code", "install_packages", "sandbox_status"}
+    _SANDBOX_SESSION_TOOLS = {
+        "sandbox_run_code", "sandbox_install_packages", "sandbox_get_status",
+        "sandbox_write_file", "sandbox_read_file", "sandbox_list_files",
+        "sandbox_download_file", "sandbox_upload_file",
+        "sandbox_enable_network", "sandbox_disable_network",
+    }
+    # Sandbox tools that need data_path injected so the sandbox server
+    # can mount the agent's data directory into the container.
+    _SANDBOX_DATA_PATH_TOOLS = {
+        "sandbox_run_code", "sandbox_install_packages", "sandbox_get_status",
+    }
 
     def has_sandbox_tools(self) -> bool:
         """Check if sandbox code execution tools are registered."""
