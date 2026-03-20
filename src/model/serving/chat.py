@@ -25,6 +25,7 @@ import json
 import re
 import types
 import uuid
+import httpx
 from openai import AsyncOpenAI, OpenAIError, APITimeoutError
 from typing import List, Optional, Any
 
@@ -857,7 +858,9 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                                kwargs.get('session_history', None), memories)
 
     api_key = _resolve_api_key(host, host_key)
-    client = AsyncOpenAI(base_url=host, api_key=api_key)
+    # Use explicit timeout if provided; -1 or None means no timeout (infinite wait).
+    _client_timeout = None if (timeout is None or timeout < 0) else timeout
+    client = AsyncOpenAI(base_url=host, api_key=api_key, timeout=_client_timeout)
 
     # Resolve model: use explicit name if provided, otherwise auto-detect.
     if not model:
@@ -951,8 +954,8 @@ async def chat(host: str = "http://127.0.0.1:8001/v1",
                     logger.warning("Safety queue triggered after API call, exiting chat loop.")
                     return None
                 break  # success — exit retry loop
-            except APITimeoutError as e:
-                api_error = f"Request to {host} timed out after {timeout} seconds."
+            except (APITimeoutError, httpx.ReadTimeout) as e:
+                api_error = f"Request to {host} timed out (read timeout during streaming)."
                 logger.error(api_error)
                 if chat_ui:
                     chat_ui.add_log(api_error, level="error")

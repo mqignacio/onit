@@ -113,6 +113,7 @@ mcp:
 | `--topic` | Default topic context (e.g. `"machine learning"`) | — |
 | `--prompt-intro` | Custom system prompt intro | — |
 | `--no-stream` | Disable token streaming | `false` |
+| `--think` | Enable thinking/reasoning mode (CoT) | `false` |
 
 **Text UI:**
 

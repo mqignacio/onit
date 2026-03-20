@@ -859,12 +859,25 @@ class ChatUI:
         return self._input_with_history_unix(prompt)
 
     @staticmethod
-    def _redraw_line(prompt: str, current_input: list[str]) -> None:
-        """Clear the current line and redraw the prompt with the given input."""
-        sys.stdout.write('\r' + ' ' * (len(prompt) + len(current_input) + 5) + '\r')
-        sys.stdout.write(f"\033[1;32m{prompt}\033[0m")
-        sys.stdout.write(''.join(current_input))
+    def _redraw_line(prompt: str, current_input: list[str], prev_lines: int = 1) -> int:
+        """Clear and redraw the prompt with the given input (supports multiline).
+
+        Returns:
+            Number of display lines used.
+        """
+        # Move cursor up to the first line of the current display
+        if prev_lines > 1:
+            sys.stdout.write(f'\033[{prev_lines - 1}A')
+        # Clear from start of first line to end of screen
+        sys.stdout.write('\r\033[J')
+
+        text = ''.join(current_input)
+        lines = text.split('\n')
+        sys.stdout.write(f"\033[1;32m{prompt}\033[0m{lines[0]}")
+        for line in lines[1:]:
+            sys.stdout.write(f"\r\n\033[1;32m  \033[0m{line}")
         sys.stdout.flush()
+        return len(lines)
 
     def _handle_arrow_keys(
         self,
@@ -874,11 +887,12 @@ class ChatUI:
         cursor_pos: int,
         temp_history_index: int,
         saved_input: str,
-    ) -> tuple[list[str], int, int, str]:
+        num_display_lines: int = 1,
+    ) -> tuple[list[str], int, int, str, int]:
         """Handle up/down/left/right arrow key navigation.
 
         Returns:
-            Updated (current_input, cursor_pos, temp_history_index, saved_input).
+            Updated (current_input, cursor_pos, temp_history_index, saved_input, num_display_lines).
         """
         if code == 'A':  # Up arrow
             if self.input_history:
@@ -891,7 +905,7 @@ class ChatUI:
                 if temp_history_index >= 0:
                     current_input = list(self.input_history[temp_history_index])
                     cursor_pos = len(current_input)
-                    self._redraw_line(prompt, current_input)
+                    num_display_lines = self._redraw_line(prompt, current_input, num_display_lines)
 
         elif code == 'B':  # Down arrow
             if temp_history_index != -1:
@@ -902,7 +916,7 @@ class ChatUI:
                 else:
                     current_input = list(self.input_history[temp_history_index])
                 cursor_pos = len(current_input)
-                self._redraw_line(prompt, current_input)
+                num_display_lines = self._redraw_line(prompt, current_input, num_display_lines)
 
         elif code == 'C':  # Right arrow
             if cursor_pos < len(current_input):
@@ -916,7 +930,7 @@ class ChatUI:
                 sys.stdout.write('\033[D')
                 sys.stdout.flush()
 
-        return current_input, cursor_pos, temp_history_index, saved_input
+        return current_input, cursor_pos, temp_history_index, saved_input, num_display_lines
 
     @staticmethod
     def _handle_delete_key(
@@ -977,6 +991,7 @@ class ChatUI:
         """
         Get user input with history navigation using up/down arrow keys.
         Uses termios/tty for raw terminal control (Unix/Linux/macOS only).
+        Supports bracketed paste mode for pasting multi-line text.
 
         Args:
             prompt: The prompt string to display
@@ -984,8 +999,8 @@ class ChatUI:
         Returns:
             The user's input string
         """
-        # Show blinking bar cursor + bold green prompt
-        sys.stdout.write(f"\033[?25h\033[5 q\033[1;32m{prompt}\033[0m")
+        # Enable bracketed paste mode + show blinking bar cursor + bold green prompt
+        sys.stdout.write(f"\033[?2004h\033[?25h\033[5 q\033[1;32m{prompt}\033[0m")
         sys.stdout.flush()
 
         fd = sys.stdin.fileno()
@@ -998,18 +1013,29 @@ class ChatUI:
             cursor_pos = 0
             temp_history_index = -1
             saved_input = ""
+            in_paste = False
+            num_display_lines = 1
 
             while True:
                 char = sys.stdin.read(1)
 
-                if char in ('\r', '\n'):  # Enter key
-                    sys.stdout.write('\r\n')
-                    sys.stdout.flush()
-                    result = ''.join(current_input)
-                    if result.strip() and (not self.input_history or self.input_history[-1] != result):
-                        self.input_history.append(result)
-                    self.history_index = -1
-                    return result
+                if char in ('\r', '\n'):
+                    if in_paste:
+                        # Insert literal newline during paste
+                        current_input.insert(cursor_pos, '\n')
+                        cursor_pos += 1
+                        num_display_lines += 1
+                        sys.stdout.write('\r\n\033[1;32m  \033[0m')
+                        sys.stdout.flush()
+                    else:
+                        # Submit input
+                        sys.stdout.write('\r\n')
+                        sys.stdout.flush()
+                        result = ''.join(current_input)
+                        if result.strip() and (not self.input_history or self.input_history[-1] != result):
+                            self.input_history.append(result)
+                        self.history_index = -1
+                        return result
 
                 elif char == '\x03':  # Ctrl+C
                     sys.stdout.write('\r\n')
@@ -1025,15 +1051,29 @@ class ChatUI:
                     next1 = sys.stdin.read(1)
                     if next1 == '[':
                         next2 = sys.stdin.read(1)
-                        if next2 == '3':  # Delete key
+                        if next2 == '2':
+                            # Check for bracketed paste: \e[200~ (start) or \e[201~ (end)
+                            next3 = sys.stdin.read(1)
+                            if next3 == '0':
+                                next4 = sys.stdin.read(1)
+                                next5 = sys.stdin.read(1)  # should be '~'
+                                if next4 == '0' and next5 == '~':
+                                    in_paste = True
+                                elif next4 == '1' and next5 == '~':
+                                    in_paste = False
+                                # else: unknown sequence, discard
+                            elif next3 == '~':
+                                pass  # Insert key (\e[2~), ignore
+                            # else: unknown \e[2X sequence, discard
+                        elif next2 == '3':  # Delete key
                             current_input, cursor_pos = self._handle_delete_key(
                                 current_input, cursor_pos,
                             )
                         else:  # Arrow keys (A/B/C/D)
-                            current_input, cursor_pos, temp_history_index, saved_input = (
+                            current_input, cursor_pos, temp_history_index, saved_input, num_display_lines = (
                                 self._handle_arrow_keys(
                                     next2, prompt, current_input, cursor_pos,
-                                    temp_history_index, saved_input,
+                                    temp_history_index, saved_input, num_display_lines,
                                 )
                             )
 
@@ -1048,6 +1088,9 @@ class ChatUI:
                     )
 
         finally:
+            # Disable bracketed paste mode and restore terminal
+            sys.stdout.write("\033[?2004l")
+            sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)  # type: ignore[name-defined]
 
     def _input_with_history_windows(self, prompt: str = "➤ ") -> str:

@@ -522,6 +522,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help='Text UI theme (e.g. "white", "dark").')
     parser.add_argument('--show-logs', action='store_true', default=None,
                         help='Show execution logs.')
+    parser.add_argument('--think', action='store_true', default=None,
+                        help='Enable thinking/reasoning mode (CoT).')
     parser.add_argument('--no-stream', action='store_true', default=None,
                         dest='no_stream',
                         help='Disable streaming of tokens (streaming is enabled by default for text, web and a2a modes).')
@@ -647,6 +649,10 @@ def _parse_and_resolve_config(args: argparse.Namespace) -> dict:
     # --model overrides serving.model in config
     if args.model:
         config_data.setdefault('serving', {})['model'] = args.model
+
+    # --think overrides serving.think in config
+    if args.think:
+        config_data.setdefault('serving', {})['think'] = True
 
     # --mcp-host overrides mcp.mcp_host in config
     if args.mcp_host:
